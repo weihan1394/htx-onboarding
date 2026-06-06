@@ -1,0 +1,51 @@
+services:
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    platform: linux/arm64
+    container_name: temporal
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=htx_svc
+      - POSTGRES_PWD=e2c52874223da7b3
+      - POSTGRES_SEEDS=postgres
+      - DBNAME=temporal_db
+      - VISIBILITY_DBNAME=temporal_visibility
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    volumes:
+      - ./config:/etc/temporal/config/dynamicconfig
+      - ./data:/etc/temporal/data
+    ports:
+      - "7233:7233"
+    networks:
+      - htx-network
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    platform: linux/arm64
+    container_name: temporal-ui
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8080:8080"
+    networks:
+      - htx-network
+    depends_on:
+      - temporal
+
+  temporal-admin-tools:
+    image: temporalio/admin-tools:1.25.2-tctl-1.18.1-cli-1.1.2
+    platform: linux/arm64
+    container_name: temporal-admin-tools
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    command: sleep infinity
+    networks:
+      - htx-network
+    depends_on:
+      - temporal
+
+networks:
+  htx-network:
+    external: true

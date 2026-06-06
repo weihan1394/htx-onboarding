@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: htx_svc
+      POSTGRES_PASSWORD: e2c52874223da7b3
+      POSTGRES_DB: postgres
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d
+      - ./data:/var/lib/postgresql
+    ports:
+      - "54320:5432"
+    networks:
+      - htx-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U htx_svc"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  htx-network:
+    external: true

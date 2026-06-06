@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - ECR Repositories
+
+Resources:
+
+  HRSvcRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/hr-svc
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: >
+          {"rules":[{"rulePriority":1,"description":"Keep last 5 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},
+          "action":{"type":"expire"}}]}
+
+  OnboardingSvcRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/onboarding-svc
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: >
+          {"rules":[{"rulePriority":1,"description":"Keep last 5 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},
+          "action":{"type":"expire"}}]}
+
+  WorkflowSvcRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/workflow-svc
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: >
+          {"rules":[{"rulePriority":1,"description":"Keep last 5 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},
+          "action":{"type":"expire"}}]}
+
+  HRDBMigrateRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/hr-db-migrate
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+  OnboardingDBMigrateRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/onboarding-db-migrate
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+  # postgres:17-alpine mirrored here — used by the db-init one-shot task
+  DBInitRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/db-init
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+  # Temporal mirrored here — private subnets cannot pull from Docker Hub directly
+  TemporalRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/temporal
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+  # Temporal UI mirrored here — private subnets cannot pull from Docker Hub directly
+  TemporalUIRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/temporal-ui
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+Outputs:
+  HRSvcRepoUri:
+    Value: !GetAtt HRSvcRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-HRSvcRepoUri
+  OnboardingSvcRepoUri:
+    Value: !GetAtt OnboardingSvcRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-OnboardingSvcRepoUri
+  WorkflowSvcRepoUri:
+    Value: !GetAtt WorkflowSvcRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-WorkflowSvcRepoUri
+  HRDBMigrateRepoUri:
+    Value: !GetAtt HRDBMigrateRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-HRDBMigrateRepoUri
+  OnboardingDBMigrateRepoUri:
+    Value: !GetAtt OnboardingDBMigrateRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-OnboardingDBMigrateRepoUri
+  DBInitRepoUri:
+    Value: !GetAtt DBInitRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-DBInitRepoUri
+  TemporalRepoUri:
+    Value: !GetAtt TemporalRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-TemporalRepoUri
+  TemporalUIRepoUri:
+    Value: !GetAtt TemporalUIRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-TemporalUIRepoUri

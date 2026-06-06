@@ -1,0 +1,27 @@
+# Postgres, Temporal, Valkey, and services data volumes
+ops/local/templates/postgres/data/
+ops/local/templates/temporal/data/
+ops/local/templates/valkey/data/
+ops/local/templates/services/data/*
+!ops/local/templates/services/data/hr-web
+ops/local/templates/services/data/hr-web/*
+!ops/local/templates/services/data/hr-web/nginx.conf
+
+# Local dev overrides (contain DB credentials for local postgres)
+**/appsettings.Development.json
+
+# .NET build output
+**/bin/
+**/obj/
+
+# Test results and coverage reports (generated artifacts)
+TestResults/
+hr-web/coverage/
+
+# Node
+node_modules/
+hr-web/dist/
+
+# Claude Code memory (local AI assistant state)
+.claude/
+ops/aws/packaged.yaml

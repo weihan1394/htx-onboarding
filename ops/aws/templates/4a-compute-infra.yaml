@@ -1,0 +1,481 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - ECS Cluster, Internal ALB, Services, Cloud Map
+
+Parameters:
+  ImageTag:
+    Type: String
+    Default: latest
+
+  TemporalVersion:
+    Type: String
+    Default: "1.25.2"
+
+  TemporalUIVersion:
+    Type: String
+    Default: "2.26.2"
+
+Resources:
+
+  # ── CloudWatch Log Groups ─────────────────────────────────────────────────────
+  HRSvcLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/htx-onboarding/hr-svc
+      RetentionInDays: 14
+
+  OnboardingSvcLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/htx-onboarding/onboarding-svc
+      RetentionInDays: 14
+
+  WorkflowSvcLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/htx-onboarding/workflow-svc
+      RetentionInDays: 14
+
+  TemporalLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/htx-onboarding/temporal
+      RetentionInDays: 14
+
+  TemporalUILogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/htx-onboarding/temporal-ui
+      RetentionInDays: 14
+
+  # ── IAM ───────────────────────────────────────────────────────────────────────
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: htx-onboarding-task-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !ImportValue htx-onboarding-HRSvcConnectionSecretArn
+                  - !ImportValue htx-onboarding-OnboardingSvcConnectionSecretArn
+                  - !ImportValue htx-onboarding-DBAdminSecretArn
+
+  # ── Cloud Map (internal DNS for service-to-service calls) ─────────────────────
+  CloudMapNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: htx-network
+      Vpc: !ImportValue htx-onboarding-VPCId
+
+  HRSvcDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: hr-svc
+      NamespaceId: !Ref CloudMapNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  OnboardingSvcDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: onboarding-svc
+      NamespaceId: !Ref CloudMapNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  WorkflowSvcDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: workflow-svc
+      NamespaceId: !Ref CloudMapNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  TemporalDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: temporal
+      NamespaceId: !Ref CloudMapNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  TemporalUIDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: temporal-ui
+      NamespaceId: !Ref CloudMapNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # ── Internal ALB (CloudFront VPC Origin connects to this) ─────────────────────
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: htx-onboarding-internal
+      Type: application
+      Scheme: internal
+      SecurityGroups: [!ImportValue htx-onboarding-ALBSecurityGroupId]
+      Subnets:
+        - !ImportValue htx-onboarding-AppSubnet1Id
+        - !ImportValue htx-onboarding-AppSubnet2Id
+      LoadBalancerAttributes:
+        # SSE connections must stay open for minutes/hours — default 60s would kill live streams
+        - Key: idle_timeout.timeout_seconds
+          Value: '3600'
+
+  HRSvcTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: htx-hr-svc
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue htx-onboarding-VPCId
+      HealthCheckPath: /health
+
+  OnboardingSvcTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: htx-onboarding-svc
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue htx-onboarding-VPCId
+      HealthCheckPath: /health
+
+  TemporalUITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: htx-temporal-ui
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue htx-onboarding-VPCId
+      HealthCheckPath: /temporal-ui
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '404'
+
+  TemporalUIRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 5
+      Conditions:
+        - Field: path-pattern
+          Values: ['/temporal-ui*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TemporalUITargetGroup
+
+  OnboardingSvcRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ['/api/onboarding*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref OnboardingSvcTargetGroup
+
+  HRSvcRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ['/api/hr*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref HRSvcTargetGroup
+
+  # ── ECS Cluster ───────────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: htx-onboarding
+
+  # ── Task Definitions ──────────────────────────────────────────────────────────
+  HRSvcTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: htx-onboarding-hr-svc
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: hr-svc
+          Image: !Join [':', [!ImportValue htx-onboarding-HRSvcRepoUri, !Ref ImageTag]]
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: ASPNETCORE_ENVIRONMENT
+              Value: Production
+            - Name: ASPNETCORE_URLS
+              Value: http://+:8080
+            - Name: Services__WorkflowSvc
+              Value: http://workflow-svc.htx-network:8080
+            - Name: Services__OnboardingSvc
+              Value: http://onboarding-svc.htx-network:8080
+          Secrets:
+            - Name: ConnectionStrings__DefaultConnection
+              ValueFrom: !Join ['', [!ImportValue htx-onboarding-HRSvcConnectionSecretArn, ':ConnectionStrings__DefaultConnection::']]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref HRSvcLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: hr-svc
+
+  OnboardingSvcTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: htx-onboarding-onboarding-svc
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: onboarding-svc
+          Image: !Join [':', [!ImportValue htx-onboarding-OnboardingSvcRepoUri, !Ref ImageTag]]
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: ASPNETCORE_ENVIRONMENT
+              Value: Production
+            - Name: ASPNETCORE_URLS
+              Value: http://+:8080
+            - Name: ConnectionStrings__Redis
+              Value: !Join ['', [!ImportValue htx-onboarding-ValkeyEndpoint, ':6379']]
+          Secrets:
+            - Name: ConnectionStrings__DefaultConnection
+              ValueFrom: !Join ['', [!ImportValue htx-onboarding-OnboardingSvcConnectionSecretArn, ':ConnectionStrings__DefaultConnection::']]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OnboardingSvcLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: onboarding-svc
+
+  WorkflowSvcTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: htx-onboarding-workflow-svc
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: workflow-svc
+          Image: !Join [':', [!ImportValue htx-onboarding-WorkflowSvcRepoUri, !Ref ImageTag]]
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: ASPNETCORE_ENVIRONMENT
+              Value: Production
+            - Name: ASPNETCORE_URLS
+              Value: http://+:8080
+            - Name: Temporal__Host
+              Value: temporal.htx-network:7233
+            - Name: Temporal__Namespace
+              Value: htx-onboarding
+            - Name: Services__OnboardingSvc
+              Value: http://onboarding-svc.htx-network:8080
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkflowSvcLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: workflow-svc
+
+  TemporalTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: htx-onboarding-temporal
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: temporal
+          Image: !Join [':', [!ImportValue htx-onboarding-TemporalRepoUri, !Ref TemporalVersion]]
+          Essential: true
+          PortMappings:
+            - ContainerPort: 7233
+          Environment:
+            - Name: DB
+              Value: postgres12
+            - Name: DB_PORT
+              Value: '5432'
+            - Name: POSTGRES_SEEDS
+              Value: !ImportValue htx-onboarding-DBEndpoint
+            - Name: DBNAME
+              Value: temporal_db
+            - Name: DEFAULT_NAMESPACE
+              Value: htx-onboarding
+            - Name: DEFAULT_NAMESPACE_RETENTION
+              Value: '7'
+            - Name: VISIBILITY_DBNAME
+              Value: temporal_visibility
+            - Name: SQL_TLS_ENABLED
+              Value: 'true'
+            - Name: SQL_HOST_VERIFICATION
+              Value: 'false'
+            - Name: POSTGRES_TLS_ENABLED
+              Value: 'true'
+            - Name: POSTGRES_TLS_DISABLE_HOST_VERIFICATION
+              Value: 'true'
+          Secrets:
+            - Name: POSTGRES_USER
+              ValueFrom: !Join ['', [!ImportValue htx-onboarding-DBAdminSecretArn, ':username::']]
+            - Name: POSTGRES_PWD
+              ValueFrom: !Join ['', [!ImportValue htx-onboarding-DBAdminSecretArn, ':password::']]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TemporalLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: temporal
+
+  TemporalUITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: htx-onboarding-temporal-ui
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: temporal-ui
+          Image: !Join [':', [!ImportValue htx-onboarding-TemporalUIRepoUri, !Ref TemporalUIVersion]]
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: TEMPORAL_ADDRESS
+              Value: temporal.htx-network:7233
+            - Name: TEMPORAL_UI_PORT
+              Value: '8080'
+            - Name: TEMPORAL_UI_PUBLIC_PATH
+              Value: /temporal-ui
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TemporalUILogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: temporal-ui
+
+Outputs:
+  ALBArn:
+    Value: !Ref ALB
+    Export:
+      Name: htx-onboarding-ALBArn
+  ALBDNSName:
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: htx-onboarding-ALBDNSName
+  ECSClusterName:
+    Value: !Ref ECSCluster
+    Export:
+      Name: htx-onboarding-ECSClusterName
+  HRSvcTargetGroupArn:
+    Value: !Ref HRSvcTargetGroup
+    Export:
+      Name: htx-onboarding-HRSvcTargetGroupArn
+  OnboardingSvcTargetGroupArn:
+    Value: !Ref OnboardingSvcTargetGroup
+    Export:
+      Name: htx-onboarding-OnboardingSvcTargetGroupArn
+  HRSvcDiscoveryArn:
+    Value: !GetAtt HRSvcDiscovery.Arn
+    Export:
+      Name: htx-onboarding-HRSvcDiscoveryArn
+  OnboardingSvcDiscoveryArn:
+    Value: !GetAtt OnboardingSvcDiscovery.Arn
+    Export:
+      Name: htx-onboarding-OnboardingSvcDiscoveryArn
+  WorkflowSvcDiscoveryArn:
+    Value: !GetAtt WorkflowSvcDiscovery.Arn
+    Export:
+      Name: htx-onboarding-WorkflowSvcDiscoveryArn
+  TemporalDiscoveryArn:
+    Value: !GetAtt TemporalDiscovery.Arn
+    Export:
+      Name: htx-onboarding-TemporalDiscoveryArn
+  TemporalUITargetGroupArn:
+    Value: !Ref TemporalUITargetGroup
+    Export:
+      Name: htx-onboarding-TemporalUITargetGroupArn
+  TemporalUIDiscoveryArn:
+    Value: !GetAtt TemporalUIDiscovery.Arn
+    Export:
+      Name: htx-onboarding-TemporalUIDiscoveryArn
+  HRSvcTaskDefArn:
+    Value: !Ref HRSvcTaskDef
+    Export:
+      Name: htx-onboarding-HRSvcTaskDefArn
+  OnboardingSvcTaskDefArn:
+    Value: !Ref OnboardingSvcTaskDef
+    Export:
+      Name: htx-onboarding-OnboardingSvcTaskDefArn
+  WorkflowSvcTaskDefArn:
+    Value: !Ref WorkflowSvcTaskDef
+    Export:
+      Name: htx-onboarding-WorkflowSvcTaskDefArn
+  TemporalUITaskDefArn:
+    Value: !Ref TemporalUITaskDef
+    Export:
+      Name: htx-onboarding-TemporalUITaskDefArn

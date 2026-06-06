@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/hr-svc/">
+    <Project Path="hr-svc/HrService.csproj" />
+  </Folder>
+  <Folder Name="/onboarding-svc/">
+    <Project Path="onboarding-svc/OnboardingService.csproj" />
+  </Folder>
+  <Folder Name="/workflow-svc/">
+    <Project Path="workflow-svc/WorkflowService.csproj" />
+  </Folder>
+</Solution>

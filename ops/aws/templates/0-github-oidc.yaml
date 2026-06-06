@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - GitHub Actions OIDC Identity Provider and deploy role
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: weihan1394
+    Description: GitHub organisation or user that owns the repository
+
+  GitHubRepo:
+    Type: String
+    Default: htx-onboarding
+    Description: Repository name without the org prefix
+
+  CreateOIDCProvider:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Set to false if token.actions.githubusercontent.com is already registered as
+      an OIDC provider in this account (only one provider per URL is allowed).
+
+Conditions:
+  ShouldCreateOIDCProvider: !Equals [!Ref CreateOIDCProvider, 'true']
+
+Resources:
+
+  # ── GitHub OIDC provider (one per AWS account) ────────────────────────────────
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        # GitHub's current signing cert thumbprint — stable but verify at
+        # https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  # ── Deploy role ───────────────────────────────────────────────────────────────
+  # Assumed by GitHub Actions jobs via sts:AssumeRoleWithWebIdentity.
+  # Trust is locked to pushes on main only — PRs and feature branches are excluded.
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: htx-onboarding-github-deploy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # StringLike so the * in the sub claim is matched literally — restricts
+              # to main-branch pushes only; fork PRs cannot satisfy this constraint.
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+      Policies:
+
+        # ECR — login + push all htx-onboarding repos (service images + migration images)
+        - PolicyName: ECRPush
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/htx-onboarding/*"
+
+        # ECS — register task defs + run migration tasks (_migrate.sh) + update services (promote)
+        - PolicyName: ECSMigrateAndDeploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RegisterTaskDefinition
+                  - ecs:RunTask
+                  - ecs:DescribeTasks
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                Resource: '*'
+              # Required so ECS can attach the task execution role to Fargate tasks
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/htx-onboarding-task-execution"
+
+        # CloudFormation — read stack outputs (cluster name, ECR URIs, CDN domain, etc.)
+        - PolicyName: CloudFormationDescribe
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/htx-onboarding-*/*"
+
+        # Secrets Manager — admin DB credentials consumed by _migrate.sh
+        - PolicyName: SecretsManagerMigration
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:htx-onboarding/prod/db/admin*"
+
+        # CloudWatch Logs — create/configure the migration log group (_migrate.sh)
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:PutRetentionPolicy
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/htx-onboarding/*"
+
+        # S3 — sync hr-web dist/ to the frontend bucket (promote)
+        - PolicyName: S3HRWeb
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::htx-onboarding-*/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::htx-onboarding-*"
+
+        # CloudFront — invalidate /* after each hr-web deploy (promote)
+        - PolicyName: CloudFrontInvalidation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/*"
+
+Outputs:
+  GitHubDeployRoleArn:
+    Value: !GetAtt GitHubDeployRole.Arn
+    Description: >
+      Copy this ARN and add it as the AWS_ROLE_ARN secret in your GitHub repo:
+      Settings → Secrets and variables → Actions → New repository secret
+    Export:
+      Name: htx-onboarding-GitHubDeployRoleArn

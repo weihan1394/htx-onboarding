@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - ECS app services (deployed after Temporal is stable and namespace is bootstrapped)
+
+Resources:
+
+  TemporalUIService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: temporal-ui
+      Cluster: !ImportValue htx-onboarding-ECSClusterName
+      TaskDefinition: !ImportValue htx-onboarding-TemporalUITaskDefArn
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: [!ImportValue htx-onboarding-AppSubnet1Id]
+          SecurityGroups: [!ImportValue htx-onboarding-ECSSecurityGroupId]
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: temporal-ui
+          ContainerPort: 8080
+          TargetGroupArn: !ImportValue htx-onboarding-TemporalUITargetGroupArn
+      ServiceRegistries:
+        - RegistryArn: !ImportValue htx-onboarding-TemporalUIDiscoveryArn
+
+  OnboardingSvcService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: onboarding-svc
+      Cluster: !ImportValue htx-onboarding-ECSClusterName
+      TaskDefinition: !ImportValue htx-onboarding-OnboardingSvcTaskDefArn
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: [!ImportValue htx-onboarding-AppSubnet1Id]
+          SecurityGroups: [!ImportValue htx-onboarding-ECSSecurityGroupId]
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: onboarding-svc
+          ContainerPort: 8080
+          TargetGroupArn: !ImportValue htx-onboarding-OnboardingSvcTargetGroupArn
+      ServiceRegistries:
+        - RegistryArn: !ImportValue htx-onboarding-OnboardingSvcDiscoveryArn
+
+  WorkflowSvcService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: workflow-svc
+      Cluster: !ImportValue htx-onboarding-ECSClusterName
+      TaskDefinition: !ImportValue htx-onboarding-WorkflowSvcTaskDefArn
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: [!ImportValue htx-onboarding-AppSubnet1Id]
+          SecurityGroups: [!ImportValue htx-onboarding-ECSSecurityGroupId]
+          AssignPublicIp: DISABLED
+      ServiceRegistries:
+        - RegistryArn: !ImportValue htx-onboarding-WorkflowSvcDiscoveryArn
+
+  HRSvcService:
+    Type: AWS::ECS::Service
+    DependsOn: WorkflowSvcService
+    Properties:
+      ServiceName: hr-svc
+      Cluster: !ImportValue htx-onboarding-ECSClusterName
+      TaskDefinition: !ImportValue htx-onboarding-HRSvcTaskDefArn
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: [!ImportValue htx-onboarding-AppSubnet1Id]
+          SecurityGroups: [!ImportValue htx-onboarding-ECSSecurityGroupId]
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: hr-svc
+          ContainerPort: 8080
+          TargetGroupArn: !ImportValue htx-onboarding-HRSvcTargetGroupArn
+      ServiceRegistries:
+        - RegistryArn: !ImportValue htx-onboarding-HRSvcDiscoveryArn

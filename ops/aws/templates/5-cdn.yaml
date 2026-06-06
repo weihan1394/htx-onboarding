@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - CloudFront, S3 (hr-web), VPC Origin
+
+Parameters:
+  TemporalUIBasicAuth:
+    Type: String
+    Description: >
+      Base64-encoded "username:password" for Temporal UI.
+      Generate with: echo -n 'user:pass' | base64
+    NoEcho: true
+    Default: YWRtaW46Y2hhbmdlbWU=
+
+Resources:
+
+  # ── CloudFront Function — Basic auth for Temporal UI ─────────────────────────
+  TemporalUIAuthFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: htx-onboarding-temporal-ui-auth
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Basic auth guard for Temporal UI
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          var request = event.request;
+          var authHeader = request.headers['authorization'];
+          if (!authHeader || authHeader.value !== 'Basic ${TemporalUIBasicAuth}') {
+            return {
+              statusCode: 401,
+              statusDescription: 'Unauthorized',
+              headers: { 'www-authenticate': { value: 'Basic realm="Temporal UI"' } }
+            };
+          }
+          delete request.headers['authorization'];
+          return request;
+        }
+
+  # ── S3 Bucket (hr-web static assets) ─────────────────────────────────────────
+  HRWebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub htx-onboarding-hr-web-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── CloudFront Origin Access Control (for S3) ─────────────────────────────────
+  S3OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: htx-onboarding-s3-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # S3 bucket policy — allows only CloudFront OAC
+  HRWebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref HRWebBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${HRWebBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # ── CloudFront VPC Origin (connects to internal ALB privately) ────────────────
+  VpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Arn: !ImportValue htx-onboarding-ALBArn
+        HTTPPort: 80
+        HTTPSPort: 443
+        Name: htx-onboarding-alb
+        OriginProtocolPolicy: http-only
+
+  # ── CloudFront Distribution ───────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: HTX Onboarding
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_All
+
+        Origins:
+          # S3 origin for hr-web static assets
+          - Id: s3-origin
+            DomainName: !GetAtt HRWebBucket.RegionalDomainName
+            OriginAccessControlId: !Ref S3OriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+
+          # Internal ALB via VPC Origin
+          - Id: alb-origin
+            DomainName: !ImportValue htx-onboarding-ALBDNSName
+            VpcOriginConfig:
+              VpcOriginId: !GetAtt VpcOrigin.Id
+
+        # Cache behaviors (most specific first)
+        CacheBehaviors:
+          # Temporal UI — auth enforced by CloudFront Function, no caching
+          - PathPattern: /temporal-ui*
+            TargetOriginId: alb-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader
+            Compress: true
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt TemporalUIAuthFunction.FunctionARN
+
+          # API routes — no caching, forward all
+          - PathPattern: /api/*
+            TargetOriginId: alb-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader
+            Compress: true
+
+        # Default behavior — S3 (hr-web SPA)
+        DefaultCacheBehavior:
+          TargetOriginId: s3-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          Compress: true
+
+        # SPA fallback — S3 with OAC returns 403 (not 404) for missing objects,
+        # so 403 is sufficient. 404 is intentionally excluded here because
+        # CustomErrorResponses is distribution-wide and intercepting 404s would
+        # break API routes on other origins (e.g. Temporal UI returning 404 for
+        # unknown namespaces).
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  CloudFrontDomain:
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: htx-onboarding-CloudFrontDomain
+  HRWebBucketName:
+    Value: !Ref HRWebBucket
+    Export:
+      Name: htx-onboarding-HRWebBucketName
+  CloudFrontDistributionId:
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: htx-onboarding-CloudFrontDistributionId

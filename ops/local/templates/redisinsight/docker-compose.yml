@@ -1,0 +1,13 @@
+services:
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: redisinsight
+    ports:
+      - "5540:5540"
+    networks:
+      - htx-network
+    restart: unless-stopped
+
+networks:
+  htx-network:
+    external: true

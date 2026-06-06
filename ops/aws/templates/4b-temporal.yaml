@@ -1,0 +1,20 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - Temporal ECS service (deployed before namespace bootstrap and app services)
+
+Resources:
+
+  TemporalService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: temporal
+      Cluster: !ImportValue htx-onboarding-ECSClusterName
+      TaskDefinition: htx-onboarding-temporal
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: [!ImportValue htx-onboarding-AppSubnet1Id]
+          SecurityGroups: [!ImportValue htx-onboarding-ECSSecurityGroupId]
+          AssignPublicIp: DISABLED
+      ServiceRegistries:
+        - RegistryArn: !ImportValue htx-onboarding-TemporalDiscoveryArn

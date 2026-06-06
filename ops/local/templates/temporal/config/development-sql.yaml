@@ -1,0 +1,22 @@
+# Temporal Dynamic Configuration for Development
+# This file contains runtime configuration for the Temporal server
+
+# Frontend service settings
+frontend.enableClientVersionCheck:
+  - value: false
+    constraints: {}
+
+# History service settings  
+history.persistenceMaxQPS:
+  - value: 3000
+    constraints: {}
+
+# Matching service settings
+matching.persistenceMaxQPS:
+  - value: 3000
+    constraints: {}
+
+# Enable debug logging
+system.enableLogSampling:
+  - value: false
+    constraints: {}

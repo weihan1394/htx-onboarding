@@ -1,0 +1,1347 @@
+name: Pipeline
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  Triggers                                                                   │
+# │  feat/**  → install + build + test + scan                                   │
+# │  main     → install + build + test + scan + break-build + promote           │
+# └─────────────────────────────────────────────────────────────────────────────┘
+on:
+  push:
+    branches:
+      - "feat/**"
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  NODE_VERSION: "22"
+  COVERAGE_MIN: "0.75"
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  Pipeline                                                                   │
+# │                                                                             │
+# │  STAGE 1 — INSTALL      install-dotnet    install-node                           │
+# │             cache:      node-modules (cache/save, consumed by build+test+promote)│
+# │  STAGE 2 — BUILD        build (×4) — compile + Docker image build           │
+# │             artifacts:  docker-image-* (1-day, consumed by scan-container)  │
+# │  STAGE 3 — TEST         test (×4) — coverage in all formats + PDF           │
+# │             artifacts:  coverage-dotnet-* (cobertura+html+lcov+json+pdf)    │
+# │                          coverage-hr-web   (html+lcov+json+cobertura+pdf)   │
+# │  STAGE 4 — SCAN         scan-sast            (json+sarif+junit-xml)         │
+# │                          scan-dependency-check (trivy: json+sarif+cdx;      │
+# │                                                  owasp: ALL+pdf)            │
+# │                          scan-container ×4   (reuses BUILD image artifact;  │
+# │                                               json+sarif+cdx per service)   │
+# │                          scan-secrets         (json+csv+sarif)              │
+# │             All scan+test jobs write GitHub job summaries                   │
+# │  STAGE 5 — BREAK-BUILD  break-build        (main push only)                 │
+# │  STAGE 6 — MIGRATE      migrate (×2, parallel) (main push only)             │
+# │             hr-db and onboarding-db run simultaneously; each builds+pushes   │
+# │             its Flyway image then runs a one-shot Fargate task               │
+# │  STAGE 7 — PROMOTE      promote (×4)       (main push only)                 │
+# │             dotnet svcs: retag BUILD artifact → ECR → ecs update-service    │
+# │             hr-web: vite build w/ live CDN URLs → S3 sync + CF invalidation │
+# │  STAGE 8 — PROMOTE·T    promote-temporal   (main push only)                 │
+# │             force-redeploy Temporal ECS service, then re-run namespace +     │
+# │             search-attribute bootstrap (idempotent one-shot Fargate task)    │
+# │  STAGE 9 — TAG-RELEASE  tag-release        (main push only)                 │
+# │             reads MAJOR.MINOR from VERSION file, auto-increments patch       │
+# │             e.g. VERSION=0.1 → release/0.1.1, 0.1.2, …                      │
+# └─────────────────────────────────────────────────────────────────────────────┘
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 1 — INSTALL
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  install-dotnet:
+    name: "INSTALL · dotnet"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Install — dotnet restore (all services)
+        run: |
+          dotnet restore hr-svc.Tests/HrService.Tests.csproj
+          dotnet restore onboarding-svc.Tests/OnboardingService.Tests.csproj
+          dotnet restore workflow-svc.Tests/WorkflowService.Tests.csproj
+
+  install-node:
+    name: "INSTALL · node"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: hr-web/package-lock.json
+
+      - name: Install — npm ci
+        working-directory: hr-web
+        run: npm ci
+
+      - name: Install — cache node_modules
+        uses: actions/cache/save@v4
+        with:
+          path: hr-web/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('hr-web/package-lock.json') }}
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 2 — BUILD
+  # Compiles each service AND builds its Docker image.
+  # The Docker image is exported as a tarball artifact consumed by scan-container.
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  build:
+    name: "BUILD · ${{ matrix.service }}"
+    needs: [install-dotnet, install-node]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: hr-svc
+            runtime: dotnet
+            project: hr-svc/HrService.csproj
+            context: hr-svc
+
+          - service: onboarding-svc
+            runtime: dotnet
+            project: onboarding-svc/OnboardingService.csproj
+            context: onboarding-svc
+
+          - service: workflow-svc
+            runtime: dotnet
+            project: workflow-svc/WorkflowService.csproj
+            context: workflow-svc
+
+          - service: hr-web
+            runtime: node
+            context: hr-web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── dotnet compile ────────────────────────────────────────────────────────
+      - name: Setup .NET
+        if: matrix.runtime == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore NuGet cache
+        if: matrix.runtime == 'dotnet'
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Build — dotnet build
+        if: matrix.runtime == 'dotnet'
+        run: dotnet build ${{ matrix.project }} --configuration Release
+
+      # ── node compile ──────────────────────────────────────────────────────────
+      - name: Setup Node.js
+        if: matrix.runtime == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build — restore node_modules cache
+        if: matrix.runtime == 'node'
+        uses: actions/cache/restore@v4
+        with:
+          path: hr-web/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('hr-web/package-lock.json') }}
+          fail-on-cache-miss: true
+
+      - name: Build — vite build
+        if: matrix.runtime == 'node'
+        working-directory: hr-web
+        run: npm run build
+
+      # ── Docker image (all services) ───────────────────────────────────────────
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build — Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          load: true
+          tags: local/${{ matrix.service }}:latest
+          cache-from: type=gha,scope=docker-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.service }}
+
+      - name: Build — export Docker image as artifact
+        run: docker save local/${{ matrix.service }}:latest | gzip > /tmp/${{ matrix.service }}.tar.gz
+
+      - name: Build — upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ matrix.service }}
+          path: /tmp/${{ matrix.service }}.tar.gz
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 3 — TEST
+  # Runs tests with coverage in all formats, generates PDF, writes job summary.
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  test:
+    name: "TEST · ${{ matrix.service }}"
+    needs: [build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: hr-svc
+            runtime: dotnet
+            project: hr-svc.Tests/HrService.Tests.csproj
+            settings: hr-svc.Tests/coverlet.runsettings
+
+          - service: onboarding-svc
+            runtime: dotnet
+            project: onboarding-svc.Tests/OnboardingService.Tests.csproj
+            settings: onboarding-svc.Tests/coverlet.runsettings
+
+          - service: workflow-svc
+            runtime: dotnet
+            project: workflow-svc.Tests/WorkflowService.Tests.csproj
+            settings: workflow-svc.Tests/coverlet.runsettings
+
+          - service: hr-web
+            runtime: node
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── dotnet ────────────────────────────────────────────────────────────────
+      - name: Setup .NET
+        if: matrix.runtime == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore NuGet cache
+        if: matrix.runtime == 'dotnet'
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Test — run with coverage
+        if: matrix.runtime == 'dotnet'
+        run: |
+          dotnet test ${{ matrix.project }} \
+            --collect:"XPlat Code Coverage" \
+            --settings ${{ matrix.settings }} \
+            --results-directory TestResults \
+            --verbosity minimal
+
+      - name: Test — enforce ≥ 75% coverage
+        if: matrix.runtime == 'dotnet'
+        env:
+          COVERAGE_MIN: ${{ env.COVERAGE_MIN }}
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET, glob, sys, os
+
+          T = float(os.environ["COVERAGE_MIN"])
+          ok = True
+
+          files = glob.glob("TestResults/**/coverage.cobertura.xml", recursive=True)
+          if not files:
+              print("❌  No coverage.cobertura.xml found")
+              sys.exit(1)
+
+          for f in files:
+              root = ET.parse(f).getroot()
+              lr = float(root.attrib["line-rate"])
+              br = float(root.attrib.get("branch-rate", "1"))
+              bv = int(root.attrib.get("branches-valid", "0"))
+              branch_ok = (bv == 0) or (br >= T)
+              line_ok   = lr >= T
+              icon = "✅" if (line_ok and branch_ok) else "❌"
+              branch_str = "N/A" if bv == 0 else f"{br:.1%}"
+              print(f"{icon}  lines={lr:.1%}  branches={branch_str}")
+              if not line_ok:
+                  print(f"    line coverage {lr:.1%} is below {T:.0%}")
+                  ok = False
+              if not branch_ok:
+                  print(f"    branch coverage {br:.1%} is below {T:.0%}")
+                  ok = False
+
+          if not ok:
+              print(f"\n❌  Coverage below {T:.0%} threshold")
+              sys.exit(1)
+          print(f"\n✅  Coverage thresholds met")
+          PY
+
+      - name: Test — generate multi-format coverage reports
+        if: always() && matrix.runtime == 'dotnet'
+        run: |
+          dotnet tool install -g dotnet-reportgenerator-globaltool 2>/dev/null || true
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          reportgenerator \
+            -reports:"TestResults/**/coverage.cobertura.xml" \
+            -targetdir:coverage-html \
+            -reporttypes:"Html;Lcov;JsonSummary;Cobertura" \
+            -title:"${{ matrix.service }} Coverage" || true
+
+      - name: Test — write coverage summary
+        if: always() && matrix.runtime == 'dotnet'
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET, glob, os
+          files = glob.glob("TestResults/**/coverage.cobertura.xml", recursive=True)
+          if not files:
+            exit(0)
+          root = ET.parse(files[0]).getroot()
+          lr = float(root.attrib["line-rate"])
+          bv = int(root.attrib.get("branches-valid", "0"))
+          br = float(root.attrib.get("branch-rate", "1"))
+          lc = int(root.attrib.get("lines-covered", "0"))
+          lv = int(root.attrib.get("lines-valid", "0"))
+          bc = int(root.attrib.get("branches-covered", "0"))
+          line_icon = "✅" if lr >= 0.8 else "❌"
+          branch_icon = "✅" if (bv == 0 or br >= 0.8) else "❌"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+            s.write("## Coverage Report — ${{ matrix.service }}\n\n")
+            s.write("| Metric | Rate | Covered / Total |\n")
+            s.write("| --- | --- | --- |\n")
+            s.write(f"| Lines | {line_icon} {lr:.1%} | {lc} / {lv} |\n")
+            if bv > 0:
+              s.write(f"| Branches | {branch_icon} {br:.1%} | {bc} / {bv} |\n")
+            else:
+              s.write("| Branches | N/A | — |\n")
+            s.write("\n> Formats: Cobertura XML · HTML · LCOV · JSON Summary · **PDF**\n")
+          PY
+
+      - name: Test — generate PDF coverage report
+        if: always() && matrix.runtime == 'dotnet'
+        run: |
+          google-chrome-stable \
+            --headless=new --disable-gpu --no-sandbox \
+            --print-to-pdf="$(pwd)/coverage-html/coverage-report.pdf" \
+            "file://$(pwd)/coverage-html/index.html" 2>/dev/null \
+          || echo "ℹ️  PDF generation skipped"
+
+      - name: Test — upload all coverage formats
+        if: always() && matrix.runtime == 'dotnet'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-dotnet-${{ matrix.service }}
+          path: |
+            TestResults/**/coverage.cobertura.xml
+            coverage-html/
+          retention-days: 7
+
+      # ── node ──────────────────────────────────────────────────────────────────
+      - name: Setup Node.js
+        if: matrix.runtime == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Test — restore node_modules cache
+        if: matrix.runtime == 'node'
+        uses: actions/cache/restore@v4
+        with:
+          path: hr-web/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('hr-web/package-lock.json') }}
+          fail-on-cache-miss: true
+
+      - name: Test — run with coverage (Vitest enforces ≥ 75%)
+        if: matrix.runtime == 'node'
+        working-directory: hr-web
+        run: npm run test:coverage
+
+      - name: Test — write coverage summary
+        if: always() && matrix.runtime == 'node'
+        run: |
+          python3 - <<'PY'
+          import json, os
+          try:
+            with open("hr-web/coverage/coverage-summary.json") as f:
+              data = json.load(f)
+          except:
+            exit(0)
+          total = data.get("total", {})
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+            s.write("## Coverage Summary — hr-web\n\n")
+            s.write("| Metric | Covered | Total | % |\n")
+            s.write("| --- | --- | --- | --- |\n")
+            for name, key in [("Lines","lines"),("Statements","statements"),("Branches","branches"),("Functions","functions")]:
+              m = total.get(key, {})
+              pct = m.get("pct", 0)
+              covered = m.get("covered", 0)
+              tot = m.get("total", 0)
+              icon = "✅" if pct >= 75 else "❌"
+              s.write(f"| {name} | {covered} | {tot} | {icon} {pct:.1f}% |\n")
+            s.write("\n> Formats: HTML · LCOV · JSON · JSON Summary · Cobertura · Clover · **PDF**\n")
+          PY
+
+      - name: Test — generate PDF coverage report
+        if: always() && matrix.runtime == 'node'
+        run: |
+          google-chrome-stable \
+            --headless=new --disable-gpu --no-sandbox \
+            --print-to-pdf="$(pwd)/hr-web/coverage/coverage-report.pdf" \
+            "file://$(pwd)/hr-web/coverage/index.html" 2>/dev/null \
+          || echo "ℹ️  PDF generation skipped"
+
+      - name: Test — upload all coverage formats
+        if: always() && matrix.runtime == 'node'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-hr-web
+          path: hr-web/coverage/
+          retention-days: 7
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 4 — SCAN
+  # All scan jobs run in parallel after tests pass.
+  # Each job writes a GitHub job summary and uploads all available formats.
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  # ── SAST: Semgrep ─────────────────────────────────────────────────────────────
+  scan-sast:
+    name: "SCAN · SAST"
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan — install Semgrep
+        run: pip install semgrep
+
+      - name: Scan — Semgrep gate (JSON)
+        run: |
+          semgrep \
+            --config p/csharp \
+            --config p/typescript \
+            --config p/react \
+            --config p/owasp-top-ten \
+            --severity ERROR \
+            --json \
+            --output semgrep-report.json \
+            .
+
+      - name: Scan — Semgrep (SARIF)
+        if: always()
+        run: |
+          semgrep \
+            --config p/csharp \
+            --config p/typescript \
+            --config p/react \
+            --config p/owasp-top-ten \
+            --severity ERROR \
+            --sarif \
+            --output semgrep-report.sarif \
+            . || true
+
+      - name: Scan — Semgrep (JUnit XML)
+        if: always()
+        run: |
+          semgrep \
+            --config p/csharp \
+            --config p/typescript \
+            --config p/react \
+            --config p/owasp-top-ten \
+            --severity ERROR \
+            --junit-xml \
+            --output semgrep-report.xml \
+            . || true
+
+      - name: Scan — write SAST summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          try:
+            with open("semgrep-report.json") as f:
+              data = json.load(f)
+          except:
+            exit(0)
+          results = data.get("results", [])
+          errors = data.get("errors", [])
+          icon = "✅" if not results else "❌"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+            s.write("## SCAN · SAST (Semgrep)\n\n")
+            s.write(f"{icon} **{len(results)} finding(s)** · {len(errors)} error(s)\n\n")
+            if results:
+              s.write("| Severity | Rule | File | Line |\n| --- | --- | --- | --- |\n")
+              for r in results[:30]:
+                sev = r.get("extra", {}).get("severity", "N/A")
+                rule = r.get("check_id", "N/A").split(".")[-1]
+                path = r.get("path", "N/A")
+                line = r.get("start", {}).get("line", "N/A")
+                s.write(f"| {sev} | `{rule}` | `{path}` | {line} |\n")
+            else:
+              s.write("No findings.\n")
+            s.write("\n> Formats: JSON · SARIF · JUnit XML  |  ❌ PDF not available (no HTML output)\n")
+          PY
+
+      - name: Scan — upload Semgrep reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: |
+            semgrep-report.json
+            semgrep-report.sarif
+            semgrep-report.xml
+          retention-days: 30
+
+  # ── Dependency Check ──────────────────────────────────────────────────────────
+  scan-dependency-check:
+    name: "SCAN · Dependency Check"
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Scan — Trivy filesystem (gate: HIGH/CRITICAL unfixed)"
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+
+      - name: Scan — Trivy filesystem (JSON)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "0"
+          severity: HIGH,CRITICAL,MEDIUM,LOW
+          ignore-unfixed: false
+          format: json
+          output: trivy-fs-report.json
+
+      - name: Scan — Trivy filesystem (SARIF)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "0"
+          severity: HIGH,CRITICAL,MEDIUM,LOW
+          ignore-unfixed: false
+          format: sarif
+          output: trivy-fs-report.sarif
+
+      - name: Scan — Trivy filesystem (CycloneDX SBOM)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: "0"
+          severity: HIGH,CRITICAL,MEDIUM,LOW
+          ignore-unfixed: false
+          format: cyclonedx
+          output: trivy-fs-report.cdx.json
+
+      - name: Scan — upload Trivy fs reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: |
+            trivy-fs-report.json
+            trivy-fs-report.sarif
+            trivy-fs-report.cdx.json
+          retention-days: 30
+
+      - name: Scan — verify NVD_API_KEY is set
+        run: |
+          if [ -z "${{ secrets.NVD_API_KEY }}" ]; then
+            echo "❌  NVD_API_KEY secret is not set. Add it under Settings → Secrets → Actions."
+            exit 1
+          fi
+          echo "✅  NVD_API_KEY is set"
+
+      - name: Scan — OWASP Dependency-Check (all formats)
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: htx-onboarding
+          path: .
+          format: ALL
+          out: owasp-dc-report
+          args: >
+            --failOnCVSS 7
+            --enableRetired
+            --nvdApiKey ${{ secrets.NVD_API_KEY }}
+
+      - name: Scan — generate PDF from OWASP DC HTML
+        if: always()
+        run: |
+          google-chrome-stable \
+            --headless=new --disable-gpu --no-sandbox \
+            --print-to-pdf="$(pwd)/owasp-dc-report/dependency-check-report.pdf" \
+            "file://$(pwd)/owasp-dc-report/dependency-check-report.html" 2>/dev/null \
+          || echo "ℹ️  PDF generation skipped"
+
+      - name: Scan — write dependency check summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          try:
+            with open("trivy-fs-report.json") as f:
+              data = json.load(f)
+          except:
+            exit(0)
+          vulns = []
+          for result in data.get("Results", []):
+            vulns.extend(result.get("Vulnerabilities", []) or [])
+          by_sev = {}
+          for v in vulns:
+            sv = v.get("Severity", "UNKNOWN")
+            by_sev[sv] = by_sev.get(sv, 0) + 1
+          icon = "✅" if not any(k in by_sev for k in ["CRITICAL","HIGH"]) else "❌"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+            s.write("## SCAN · Dependency Check\n\n")
+            s.write("### Trivy Filesystem\n\n")
+            s.write(f"{icon} **{len(vulns)} vulnerability(ies)**\n\n")
+            if by_sev:
+              s.write("| Severity | Count |\n| --- | --- |\n")
+              for sv in ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]:
+                if sv in by_sev:
+                  s.write(f"| {sv} | {by_sev[sv]} |\n")
+            s.write("\n> Trivy formats: JSON · SARIF · CycloneDX  |  ❌ PDF not available\n")
+            s.write("\n### OWASP Dependency-Check\n\n")
+            s.write("> OWASP DC formats: HTML · JSON · XML · CSV · JUnit XML · SARIF · **PDF**\n")
+          PY
+
+      - name: Scan — upload OWASP DC reports (all formats + PDF)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-dc-report
+          path: owasp-dc-report/
+          retention-days: 30
+
+  # ── Container image scan (Trivy) ──────────────────────────────────────────────
+  # Reuses the Docker image built and exported in the BUILD stage.
+  scan-container:
+    name: "SCAN · Container / ${{ matrix.service }}"
+    needs: [test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: hr-svc
+          - service: onboarding-svc
+          - service: workflow-svc
+          - service: hr-web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ matrix.service }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: |
+          gunzip -c /tmp/${{ matrix.service }}.tar.gz | docker load
+          docker tag local/${{ matrix.service }}:latest local/${{ matrix.service }}:scan
+
+      - name: "Scan — Trivy image scan (gate: HIGH/CRITICAL unfixed)"
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: local/${{ matrix.service }}:scan
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+
+      - name: Scan — Trivy image scan (JSON)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: local/${{ matrix.service }}:scan
+          exit-code: "0"
+          severity: HIGH,CRITICAL,MEDIUM,LOW
+          ignore-unfixed: false
+          format: json
+          output: trivy-${{ matrix.service }}.json
+
+      - name: Scan — Trivy image scan (SARIF)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: local/${{ matrix.service }}:scan
+          exit-code: "0"
+          severity: HIGH,CRITICAL,MEDIUM,LOW
+          ignore-unfixed: false
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+
+      - name: Scan — Trivy image scan (CycloneDX SBOM)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: local/${{ matrix.service }}:scan
+          exit-code: "0"
+          severity: HIGH,CRITICAL,MEDIUM,LOW
+          ignore-unfixed: false
+          format: cyclonedx
+          output: trivy-${{ matrix.service }}.cdx.json
+
+      - name: Scan — write container scan summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          try:
+            with open("trivy-${{ matrix.service }}.json") as f:
+              data = json.load(f)
+          except:
+            exit(0)
+          vulns = []
+          for result in data.get("Results", []):
+            vulns.extend(result.get("Vulnerabilities", []) or [])
+          by_sev = {}
+          for v in vulns:
+            sv = v.get("Severity", "UNKNOWN")
+            by_sev[sv] = by_sev.get(sv, 0) + 1
+          icon = "✅" if not any(k in by_sev for k in ["CRITICAL","HIGH"]) else "❌"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+            s.write("## SCAN · Container — ${{ matrix.service }}\n\n")
+            s.write(f"{icon} **{len(vulns)} vulnerability(ies)** in image\n\n")
+            if by_sev:
+              s.write("| Severity | Count |\n| --- | --- |\n")
+              for sv in ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]:
+                if sv in by_sev:
+                  s.write(f"| {sv} | {by_sev[sv]} |\n")
+            s.write("\n> Formats: JSON · SARIF · CycloneDX  |  ❌ PDF not available\n")
+          PY
+
+      - name: Scan — upload container scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-container-${{ matrix.service }}
+          path: |
+            trivy-${{ matrix.service }}.json
+            trivy-${{ matrix.service }}.sarif
+            trivy-${{ matrix.service }}.cdx.json
+          retention-days: 30
+
+  # ── Secret / API-key detection (gitleaks) ─────────────────────────────────────
+  scan-secrets:
+    name: "SCAN · Secret Detection"
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan — gitleaks gate (JSON)
+        run: |
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            -v "$RUNNER_TEMP/gitleaks:/output" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4 \
+            detect --source /repo --exit-code 1 --verbose \
+            --report-format json --report-path /output/gitleaks-report.json
+
+      - name: Scan — gitleaks (CSV)
+        if: always()
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            -v "$RUNNER_TEMP/gitleaks:/output" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4 \
+            detect --source /repo --exit-code 0 \
+            --report-format csv --report-path /output/gitleaks-report.csv || true
+
+      - name: Scan — gitleaks (SARIF)
+        if: always()
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo:ro" \
+            -v "$RUNNER_TEMP/gitleaks:/output" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4 \
+            detect --source /repo --exit-code 0 \
+            --report-format sarif --report-path /output/gitleaks-report.sarif || true
+
+      - name: Scan — write secrets summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          try:
+            path = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "gitleaks", "gitleaks-report.json")
+            with open(path) as f:
+              content = f.read().strip()
+            data = json.loads(content) if content and content != "null" else []
+          except:
+            data = []
+          icon = "✅" if not data else "❌"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+            s.write("## SCAN · Secret Detection (Gitleaks)\n\n")
+            if not data:
+              s.write(f"{icon} No secrets detected.\n\n")
+            else:
+              s.write(f"{icon} **{len(data)} secret(s) detected!**\n\n")
+              s.write("| Rule | File | Line |\n| --- | --- | --- |\n")
+              for leak in data[:20]:
+                rule = leak.get("RuleID", "N/A")
+                file = leak.get("File", "N/A")
+                line = leak.get("StartLine", "N/A")
+                s.write(f"| `{rule}` | `{file}` | {line} |\n")
+            s.write("> Formats: JSON · CSV · SARIF  |  ❌ PDF not available (no HTML output)\n")
+          PY
+
+      - name: Scan — upload gitleaks reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: ${{ runner.temp }}/gitleaks/
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 5 — BREAK-BUILD  (main push only)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #
+  # Pipeline (main push):
+  #   STAGE 1-4 (all branches) → STAGE 5 BREAK-BUILD → STAGE 6 MIGRATE → STAGE 7 PROMOTE
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  break-build:
+    name: "BREAK-BUILD · Quality Gate"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs:
+      - test
+      - scan-sast
+      - scan-dependency-check
+      - scan-container
+      - scan-secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-dotnet-*
+          path: coverage-artifacts
+
+      - name: Print quality gate summary
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET, glob, os
+
+          print("=" * 62)
+          print("  Quality Gate — all stages passed")
+          print("=" * 62)
+          print("  STAGE 1 — INSTALL")
+          print("  ✅  dotnet restore             NuGet cache warmed")
+          print("  ✅  npm ci                     npm cache warmed")
+          print()
+          print("  STAGE 2 — BUILD")
+          print("  ✅  hr-svc                     dotnet build + Docker image artifact")
+          print("  ✅  onboarding-svc             dotnet build + Docker image artifact")
+          print("  ✅  workflow-svc               dotnet build + Docker image artifact")
+          print("  ✅  hr-web                     Vite build + Docker image artifact")
+          print()
+          print("  STAGE 3 — TEST")
+          for f in sorted(glob.glob("coverage-artifacts/**/coverage.cobertura.xml", recursive=True)):
+              parts = f.split(os.sep)
+              svc = parts[1].replace("coverage-dotnet-", "") if len(parts) > 1 else "unknown"
+              root = ET.parse(f).getroot()
+              lr = float(root.attrib["line-rate"])
+              bv = int(root.attrib.get("branches-valid", "0"))
+              br = float(root.attrib.get("branch-rate", "1"))
+              branch_str = "N/A" if bv == 0 else f"{br:.1%}"
+              print(f"  ✅  {svc:<34} lines={lr:.1%}  branches={branch_str}")
+          print(f"  ✅  {'hr-web':<34} Vitest thresholds ≥ 75%")
+          print()
+          print("  STAGE 4 — SCAN")
+          print("  ✅  SAST             Semgrep        JSON · SARIF · JUnit XML")
+          print("  ✅  Dep Check        Trivy FS       JSON · SARIF · CycloneDX")
+          print("                       OWASP DC       HTML · JSON · XML · CSV · SARIF · PDF")
+          print("  ✅  Container (×4)   Trivy image    JSON · SARIF · CycloneDX")
+          print("  ✅  Secrets          Gitleaks       JSON · CSV · SARIF")
+          print("=" * 62)
+          print("  ➜   Proceeding to PROMOTE")
+          print("=" * 62)
+          PY
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 6 — MIGRATE  (main push only)
+  # Two matrix jobs run in parallel — one per database (hr-db, onboarding-db).
+  # Each job builds + pushes its Flyway image then runs a one-shot Fargate task.
+  # Both must succeed (exit 0) before any service is promoted.
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  migrate:
+    name: "MIGRATE · ${{ matrix.db }}"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [break-build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      REGION: ap-southeast-1
+    strategy:
+      fail-fast: true # if one DB migration fails, cancel the other immediately
+      matrix:
+        include:
+          - db: hr-db
+            build_context: hr-db
+            ecr_output: HRDBMigrateRepoUri
+            task_name: hr-db-migrate
+
+          - db: onboarding-db
+            build_context: onboarding-db
+            ecr_output: OnboardingDBMigrateRepoUri
+            task_name: onboarding-db-migrate
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-1
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Migrate — build and push ${{ matrix.db }} image
+        run: |
+          REPO=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-ecr --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='${{ matrix.ecr_output }}'].OutputValue" \
+            --output text)
+          docker build --platform linux/amd64 -t "${REPO}:latest" ${{ matrix.build_context }}/
+          docker push "${REPO}:latest"
+          echo "MIGRATE_IMAGE=${REPO}:latest" >> "${GITHUB_ENV}"
+
+      - name: Migrate — run Flyway Fargate task (${{ matrix.db }})
+        run: |
+          LOG_GROUP="/ecs/htx-onboarding/migrations"
+          TASK_NAME="${{ matrix.task_name }}"
+
+          DB_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-storage --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DBEndpoint'].OutputValue" \
+            --output text)
+          CLUSTER=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-compute-infra --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ECSClusterName'].OutputValue" \
+            --output text)
+          SUBNET=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-network --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='AppSubnet1Id'].OutputValue" \
+            --output text)
+          ECS_SG=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-network --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ECSSecurityGroupId'].OutputValue" \
+            --output text)
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          EXEC_ROLE="arn:aws:iam::${ACCOUNT_ID}:role/htx-onboarding-task-execution"
+
+          ADMIN_USER=$(aws secretsmanager get-secret-value \
+            --secret-id "htx-onboarding/prod/db/admin" --region "${REGION}" \
+            --query SecretString --output text \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['username'])")
+          ADMIN_PWD=$(aws secretsmanager get-secret-value \
+            --secret-id "htx-onboarding/prod/db/admin" --region "${REGION}" \
+            --query SecretString --output text \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+
+          aws logs create-log-group --log-group-name "${LOG_GROUP}" --region "${REGION}" 2>/dev/null || true
+          aws logs put-retention-policy \
+            --log-group-name "${LOG_GROUP}" --retention-in-days 14 --region "${REGION}"
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --region "${REGION}" \
+            --family "htx-onboarding-${TASK_NAME}" \
+            --network-mode awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu 256 --memory 512 \
+            --execution-role-arn "${EXEC_ROLE}" \
+            --container-definitions "$(jq -n \
+              --arg name "${TASK_NAME}" \
+              --arg image "${MIGRATE_IMAGE}" \
+              --arg lg "${LOG_GROUP}" \
+              --arg region "${REGION}" \
+              '[{name:$name,image:$image,essential:true,logConfiguration:{logDriver:"awslogs",options:{"awslogs-group":$lg,"awslogs-region":$region,"awslogs-stream-prefix":$name}}}]')" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "${CLUSTER}" \
+            --task-definition "${TASK_DEF_ARN}" \
+            --launch-type FARGATE \
+            --region "${REGION}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNET}],securityGroups=[${ECS_SG}],assignPublicIp=DISABLED}" \
+            --overrides "$(jq -n \
+              --arg name "${TASK_NAME}" \
+              --arg url "jdbc:postgresql://${DB_ENDPOINT}:5432/htx" \
+              --arg user "${ADMIN_USER}" \
+              --arg pwd "${ADMIN_PWD}" \
+              '{containerOverrides:[{name:$name,command:["migrate"],environment:[{name:"FLYWAY_URL",value:$url},{name:"FLYWAY_USER",value:$user},{name:"FLYWAY_PASSWORD",value:$pwd}]}]}')" \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "    Task: ${TASK_ARN}"
+          aws ecs wait tasks-stopped \
+            --cluster "${CLUSTER}" --tasks "${TASK_ARN}" --region "${REGION}"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "${CLUSTER}" --tasks "${TASK_ARN}" --region "${REGION}" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "❌  ${TASK_NAME} migration failed (exit ${EXIT_CODE})"
+            echo "    Logs: aws logs tail ${LOG_GROUP} --region ${REGION} --follow"
+            exit 1
+          fi
+          echo "✅  ${TASK_NAME} migrations applied successfully"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 7 — PROMOTE  (main push only)
+  # Reuses the Docker image tarball built in STAGE 2, retags it with git SHA,
+  # pushes to ECR, then:
+  #   - dotnet services: force-new-deployment on ECS and wait for stability
+  #   - hr-web: builds SPA with live CloudFront URLs, syncs to S3, invalidates CDN
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  promote:
+    name: "PROMOTE · ${{ matrix.service }}"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [migrate]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      REGION: ap-southeast-1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: hr-svc
+            runtime: dotnet
+            ecr_output: HRSvcRepoUri
+            ecs_service: hr-svc
+
+          - service: onboarding-svc
+            runtime: dotnet
+            ecr_output: OnboardingSvcRepoUri
+            ecs_service: onboarding-svc
+
+          - service: workflow-svc
+            runtime: dotnet
+            ecr_output: WorkflowSvcRepoUri
+            ecs_service: workflow-svc
+
+          - service: hr-web
+            runtime: node
+            ecr_output: ""
+            ecs_service: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-1
+
+      # ── dotnet services: retag BUILD artifact and push to ECR ─────────────────
+      - name: Login to ECR
+        if: matrix.runtime == 'dotnet'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download Docker image artifact
+        if: matrix.runtime == 'dotnet'
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ matrix.service }}
+          path: /tmp
+
+      - name: Promote — tag and push image to ECR
+        if: matrix.runtime == 'dotnet'
+        run: |
+          REPO=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-ecr --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='${{ matrix.ecr_output }}'].OutputValue" \
+            --output text)
+          gunzip -c /tmp/${{ matrix.service }}.tar.gz | docker load
+          docker tag local/${{ matrix.service }}:latest "${REPO}:${{ github.sha }}"
+          docker tag local/${{ matrix.service }}:latest "${REPO}:latest"
+          docker push "${REPO}:${{ github.sha }}"
+          docker push "${REPO}:latest"
+
+      - name: Promote — update ECS service and wait for stability
+        if: matrix.runtime == 'dotnet'
+        run: |
+          CLUSTER=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-compute-infra --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ECSClusterName'].OutputValue" \
+            --output text)
+          aws ecs update-service \
+            --cluster "${CLUSTER}" \
+            --service "${{ matrix.ecs_service }}" \
+            --force-new-deployment \
+            --region "${REGION}" > /dev/null
+          aws ecs wait services-stable \
+            --cluster "${CLUSTER}" \
+            --services "${{ matrix.ecs_service }}" \
+            --region "${REGION}"
+          echo "✅  ${{ matrix.service }} deployed and stable"
+
+      # ── hr-web: build SPA with live CDN URLs and sync to S3 ──────────────────
+      - name: Setup Node.js
+        if: matrix.runtime == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Promote — restore node_modules cache
+        if: matrix.runtime == 'node'
+        uses: actions/cache/restore@v4
+        with:
+          path: hr-web/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('hr-web/package-lock.json') }}
+          fail-on-cache-miss: true
+
+      - name: Promote — vite build (inject live CloudFront URLs)
+        if: matrix.runtime == 'node'
+        working-directory: hr-web
+        run: |
+          CLOUDFRONT_DOMAIN=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-cdn --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDomain'].OutputValue" \
+            --output text)
+          VITE_API_BASE_URL="https://${CLOUDFRONT_DOMAIN}" \
+          npm run build
+
+      - name: Promote — sync to S3 and invalidate CloudFront
+        if: matrix.runtime == 'node'
+        working-directory: hr-web
+        run: |
+          S3_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-cdn --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='HRWebBucketName'].OutputValue" \
+            --output text)
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-cdn --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+            --output text)
+          aws s3 sync dist/ "s3://${S3_BUCKET}/" --delete --region "${REGION}"
+          aws cloudfront create-invalidation \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --paths "/*" \
+            --region us-east-1 > /dev/null
+          echo "✅  hr-web deployed to S3 + CloudFront invalidation triggered"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 8 — PROMOTE · Temporal  (main push only)
+  # Temporal's image is pinned and already mirrored in ECR — no build step.
+  # 1. Force-redeploy the Temporal ECS service so task definition changes apply.
+  # 2. Re-run the namespace + search-attribute bootstrap (idempotent — already-
+  #    registered attributes are skipped, so this is safe on every deploy and
+  #    ensures any new search attributes added to workflow-svc are always present).
+  # Runs after all promote jobs so workflow-svc is already on the new version
+  # before the bootstrap task connects to it.
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  promote-temporal:
+    name: "PROMOTE · Temporal"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [promote]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      REGION: ap-southeast-1
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-1
+
+      - name: Promote — force-redeploy Temporal ECS service
+        run: |
+          CLUSTER=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-compute-infra --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ECSClusterName'].OutputValue" \
+            --output text)
+          aws ecs update-service \
+            --cluster "${CLUSTER}" \
+            --service temporal \
+            --force-new-deployment \
+            --region "${REGION}" > /dev/null
+          aws ecs wait services-stable \
+            --cluster "${CLUSTER}" \
+            --services temporal \
+            --region "${REGION}"
+          echo "✅  Temporal service stable"
+
+      - name: Promote — bootstrap namespace and search attributes
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          CLUSTER=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-compute-infra --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ECSClusterName'].OutputValue" \
+            --output text)
+          SUBNET=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-network --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='AppSubnet1Id'].OutputValue" \
+            --output text)
+          ECS_SG=$(aws cloudformation describe-stacks \
+            --stack-name htx-onboarding-network --region "${REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ECSSecurityGroupId'].OutputValue" \
+            --output text)
+          EXEC_ROLE="arn:aws:iam::${ACCOUNT_ID}:role/htx-onboarding-task-execution"
+          TEMPORAL_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/htx-onboarding/temporal:1.25.2"
+
+          BOOTSTRAP_CMD="
+            temporal operator namespace create --address temporal.htx-network:7233 --retention 7d htx-onboarding 2>&1 | grep -v 'already registered' || true
+            temporal operator search-attribute create --address temporal.htx-network:7233 --namespace htx-onboarding --name EmployeeName    --type Text    2>/dev/null || true
+            temporal operator search-attribute create --address temporal.htx-network:7233 --namespace htx-onboarding --name EmployeeNumber --type Keyword  2>/dev/null || true
+            temporal operator search-attribute create --address temporal.htx-network:7233 --namespace htx-onboarding --name Department     --type Keyword  2>/dev/null || true
+            echo DONE
+          "
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --region "${REGION}" \
+            --family htx-onboarding-temporal-ns-init \
+            --network-mode awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu 256 --memory 512 \
+            --execution-role-arn "${EXEC_ROLE}" \
+            --container-definitions "$(jq -n \
+              --arg image "${TEMPORAL_IMAGE}" \
+              --arg cmd "${BOOTSTRAP_CMD}" \
+              --arg region "${REGION}" \
+              '[{name:"ns-init",image:$image,essential:true,entryPoint:["/bin/sh","-c"],command:[$cmd],logConfiguration:{logDriver:"awslogs",options:{"awslogs-group":"/ecs/htx-onboarding/temporal","awslogs-region":$region,"awslogs-stream-prefix":"ns-init"}}}]')" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "${CLUSTER}" \
+            --task-definition "${TASK_DEF_ARN}" \
+            --launch-type FARGATE \
+            --region "${REGION}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNET}],securityGroups=[${ECS_SG}],assignPublicIp=DISABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "    Task: ${TASK_ARN}"
+          aws ecs wait tasks-stopped \
+            --cluster "${CLUSTER}" --tasks "${TASK_ARN}" --region "${REGION}"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "${CLUSTER}" --tasks "${TASK_ARN}" --region "${REGION}" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "❌  Temporal bootstrap failed (exit ${EXIT_CODE})"
+            exit 1
+          fi
+          echo "✅  Temporal namespace and search attributes bootstrapped"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STAGE 9 — TAG-RELEASE  (main push only)
+  # Creates a lightweight Git tag after every layer (migrations + services +
+  # Temporal) has deployed successfully.
+  # Tag format: release/YYYY-MM-DD-<short-sha>  e.g. release/2026-05-29-b3f1a2c
+  # The same short SHA is used to tag ECR images in PROMOTE, so you can trace
+  # any tag back to the exact image running in production.
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  tag-release:
+    name: "TAG · Release"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [promote-temporal]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to push the tag back to the repo
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # required to see all existing release/* tags
+
+      - name: Tag — compute next version
+        id: version
+        run: |
+          git fetch --tags
+
+          BASE=$(cat VERSION | tr -d '[:space:]')
+
+          # Validate format is MAJOR.MINOR
+          if ! echo "${BASE}" | grep -qE '^[0-9]+\.[0-9]+$'; then
+            echo "❌  VERSION '${BASE}' is not valid — must be MAJOR.MINOR (e.g. 0.1)"
+            exit 1
+          fi
+
+          # Find the highest patch already tagged for this MAJOR.MINOR
+          LATEST=$(git tag --list "release/${BASE}.*" --sort=-version:refname | head -1)
+
+          if [ -z "${LATEST}" ]; then
+            NEXT="release/${BASE}.1"
+          else
+            PATCH="${LATEST##*.}"
+            NEXT="release/${BASE}.$((PATCH + 1))"
+          fi
+
+          echo "base=${BASE}  latest=${LATEST:-none}  next=${NEXT}"
+          echo "tag=${NEXT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Tag — create and push ${{ steps.version.outputs.tag }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}" -m "Deployed ${TAG} (${GITHUB_SHA::7})"
+          git push origin "${TAG}"
+          echo "✅  Tagged: ${TAG}"

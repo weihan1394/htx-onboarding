@@ -1,0 +1,4 @@
+{
+  "dotnet.defaultSolution": "htx-onboarding.sln",
+  "omnisharp.dotNetCliPaths": ["/opt/homebrew/opt/dotnet@10/bin"]
+}

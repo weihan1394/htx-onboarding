@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - RDS, ElastiCache, Secrets Manager
+
+Resources:
+
+  # ── Secrets (passwords auto-generated; connection strings populated by 1-deploy.sh) ──
+
+  DBAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: htx-onboarding/prod/db/admin
+      Description: PostgreSQL admin credentials
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "htx_svc"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\;'
+
+  HRSvcSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: htx-onboarding/prod/db/hr-svc
+      Description: hr-svc PostgreSQL credentials
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "hr_svc"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\;'
+
+  OnboardingSvcSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: htx-onboarding/prod/db/onboarding-svc
+      Description: onboarding-svc PostgreSQL credentials
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "onboarding_svc"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\;'
+
+  # Full connection strings — placeholder updated by 1-deploy.sh after RDS endpoint is known
+  HRSvcConnectionSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: htx-onboarding/prod/connection-string/hr-svc
+      Description: Full Npgsql connection string for hr-svc
+      SecretString: '{"ConnectionStrings__DefaultConnection":"PLACEHOLDER"}'
+
+  OnboardingSvcConnectionSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: htx-onboarding/prod/connection-string/onboarding-svc
+      Description: Full Npgsql connection string for onboarding-svc
+      SecretString: '{"ConnectionStrings__DefaultConnection":"PLACEHOLDER"}'
+
+  # ── ElastiCache Valkey (pub/sub broker for SSE live status) ──────────────────
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      CacheSubnetGroupName: htx-onboarding-valkey
+      Description: Valkey subnet group
+      SubnetIds:
+        - !ImportValue htx-onboarding-AppSubnet1Id
+        - !ImportValue htx-onboarding-AppSubnet2Id
+
+  ValkeyCluster:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: htx-onboarding-valkey
+      ReplicationGroupDescription: Valkey pub/sub broker for SSE live status streaming
+      Engine: valkey
+      EngineVersion: '9.0'
+      CacheNodeType: cache.t4g.micro
+      NumCacheClusters: 1
+      AutomaticFailoverEnabled: false
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds:
+        - !ImportValue htx-onboarding-ValkeySecurityGroupId
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: false
+
+  # ── RDS PostgreSQL ────────────────────────────────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: HTX Onboarding RDS subnet group
+      SubnetIds:
+        - !ImportValue htx-onboarding-AppSubnet1Id
+        - !ImportValue htx-onboarding-AppSubnet2Id
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: htx-onboarding-prod
+      DBInstanceClass: db.t4g.micro
+      Engine: postgres
+      EngineVersion: '18.4'
+      DBName: postgres
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DBAdminSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DBAdminSecret}:SecretString:password}}'
+      AllocatedStorage: '20'
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue htx-onboarding-RDSSecurityGroupId
+      BackupRetentionPeriod: 0
+      PreferredMaintenanceWindow: sun:19:00-sun:20:00
+      DeletionProtection: true
+
+Outputs:
+  DBEndpoint:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: htx-onboarding-DBEndpoint
+  DBPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: htx-onboarding-DBPort
+  DBAdminSecretArn:
+    Value: !Ref DBAdminSecret
+    Export:
+      Name: htx-onboarding-DBAdminSecretArn
+  HRSvcSecretArn:
+    Value: !Ref HRSvcSecret
+    Export:
+      Name: htx-onboarding-HRSvcSecretArn
+  OnboardingSvcSecretArn:
+    Value: !Ref OnboardingSvcSecret
+    Export:
+      Name: htx-onboarding-OnboardingSvcSecretArn
+  HRSvcConnectionSecretArn:
+    Value: !Ref HRSvcConnectionSecret
+    Export:
+      Name: htx-onboarding-HRSvcConnectionSecretArn
+  OnboardingSvcConnectionSecretArn:
+    Value: !Ref OnboardingSvcConnectionSecret
+    Export:
+      Name: htx-onboarding-OnboardingSvcConnectionSecretArn
+  ValkeyEndpoint:
+    Value: !GetAtt ValkeyCluster.PrimaryEndPoint.Address
+    Export:
+      Name: htx-onboarding-ValkeyEndpoint
