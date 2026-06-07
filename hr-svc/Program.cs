@@ -1,3 +1,4 @@
+using Amazon.XRay.Recorder.Handlers.AspNetCore;
 using Dapper;
 using HrService.Repositories;
 using HrService.Services;
@@ -66,6 +67,7 @@ builder.Services.AddHttpClient("onboarding-svc-sse", client =>
 var app = builder.Build();
 
 app.UseCors();
+app.UseWhen(ctx => !ctx.Request.Path.StartsWithSegments("/health"), b => b.UseXRay("hr-svc"));
 // suppress /health logs at Debug to keep noise down
 app.UseSerilogRequestLogging(options =>
 {

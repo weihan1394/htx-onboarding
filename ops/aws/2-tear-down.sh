@@ -14,6 +14,7 @@ source "${SCRIPT_DIR}/../helpers/check-prerequisites.sh" --with-aws
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 HR_WEB_BUCKET="htx-onboarding-hr-web-${ACCOUNT_ID}"
+HR_WEB_LOGS_BUCKET="htx-onboarding-hr-web-logs-${ACCOUNT_ID}"
 
 ECR_REPOS=(
   htx-onboarding/hr-svc
@@ -24,6 +25,7 @@ ECR_REPOS=(
   htx-onboarding/db-init
   htx-onboarding/temporal
   htx-onboarding/temporal-ui
+  htx-onboarding/xray-daemon
 )
 
 LOG_GROUPS=(
@@ -47,6 +49,7 @@ SECRETS=(
 # Stacks deleted in reverse dependency order.
 # htx-onboarding-network is handled separately (VPC endpoint pre-cleanup needed).
 STACKS=(
+  htx-onboarding-scheduler
   htx-onboarding-cdn
   htx-onboarding-compute-services
   htx-onboarding-temporal
@@ -77,11 +80,54 @@ aws rds modify-db-instance \
     --region "${REGION}" || \
   echo "    (not found or already gone, skipping)"
 
-# ── 2. Empty hr-web S3 bucket ─────────────────────────────────────────────────
+# ── 2. Empty hr-web S3 bucket (all versions + delete markers) ────────────────
+# Versioning is enabled on the bucket, so aws s3 rm only removes current versions.
+# CloudFormation cannot delete a versioned bucket unless all versions are purged first.
 echo ""
 echo "==> [$((++STEP))] Emptying S3 bucket: ${HR_WEB_BUCKET}..."
-aws s3 rm "s3://${HR_WEB_BUCKET}" --recursive --region "${REGION}" 2>/dev/null || \
+if aws s3api head-bucket --bucket "${HR_WEB_BUCKET}" --region "${REGION}" 2>/dev/null; then
+  aws s3api delete-objects \
+    --bucket "${HR_WEB_BUCKET}" \
+    --region "${REGION}" \
+    --delete "$(aws s3api list-object-versions \
+      --bucket "${HR_WEB_BUCKET}" \
+      --region "${REGION}" \
+      --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+      --output json 2>/dev/null)" > /dev/null 2>&1 || true
+  aws s3api delete-objects \
+    --bucket "${HR_WEB_BUCKET}" \
+    --region "${REGION}" \
+    --delete "$(aws s3api list-object-versions \
+      --bucket "${HR_WEB_BUCKET}" \
+      --region "${REGION}" \
+      --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+      --output json 2>/dev/null)" > /dev/null 2>&1 || true
+  echo "    ${HR_WEB_BUCKET} — emptied (all versions)"
+else
   echo "    (not found or already empty, skipping)"
+fi
+
+if aws s3api head-bucket --bucket "${HR_WEB_LOGS_BUCKET}" --region "${REGION}" 2>/dev/null; then
+  aws s3api delete-objects \
+    --bucket "${HR_WEB_LOGS_BUCKET}" \
+    --region "${REGION}" \
+    --delete "$(aws s3api list-object-versions \
+      --bucket "${HR_WEB_LOGS_BUCKET}" \
+      --region "${REGION}" \
+      --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+      --output json 2>/dev/null)" > /dev/null 2>&1 || true
+  aws s3api delete-objects \
+    --bucket "${HR_WEB_LOGS_BUCKET}" \
+    --region "${REGION}" \
+    --delete "$(aws s3api list-object-versions \
+      --bucket "${HR_WEB_LOGS_BUCKET}" \
+      --region "${REGION}" \
+      --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+      --output json 2>/dev/null)" > /dev/null 2>&1 || true
+  echo "    ${HR_WEB_LOGS_BUCKET} — emptied (all versions)"
+else
+  echo "    (not found or already empty, skipping)"
+fi
 
 # ── 3. Force-delete ECR repositories ─────────────────────────────────────────
 # delete-repository --force empties the repo and deletes it atomically.
@@ -306,10 +352,21 @@ for LG in "${LOG_GROUPS[@]}"; do
     echo "    ${LG} — (not found, skipping)"
 done
 
-# ── 6. Deregister one-shot ECS task definitions ──────────────────────────────
+# ── 6. Deregister all ECS task definitions ───────────────────────────────────
+# CloudFormation does not deregister task definitions on stack delete — all
+# revisions remain as INACTIVE entries until explicitly deregistered.
 echo ""
-echo "==> [$((++STEP))] Deregistering one-shot task definitions..."
-for FAMILY in "htx-onboarding-db-init" "htx-onboarding-hr-db-migrate" "htx-onboarding-onboarding-db-migrate" "htx-onboarding-temporal-ns-init"; do
+echo "==> [$((++STEP))] Deregistering all task definitions..."
+for FAMILY in \
+  "htx-onboarding-hr-svc" \
+  "htx-onboarding-onboarding-svc" \
+  "htx-onboarding-workflow-svc" \
+  "htx-onboarding-temporal" \
+  "htx-onboarding-temporal-ui" \
+  "htx-onboarding-db-init" \
+  "htx-onboarding-hr-db-migrate" \
+  "htx-onboarding-onboarding-db-migrate" \
+  "htx-onboarding-temporal-ns-init"; do
   TASK_DEF_ARNS=$(aws ecs list-task-definitions \
     --family-prefix "${FAMILY}" \
     --region "${REGION}" \

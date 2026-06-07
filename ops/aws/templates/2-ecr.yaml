@@ -101,6 +101,17 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: AES256
 
+  # X-Ray daemon mirrored here — private subnets cannot pull from Docker Hub directly
+  XRayDaemonRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: htx-onboarding/xray-daemon
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
 Outputs:
   HRSvcRepoUri:
     Value: !GetAtt HRSvcRepo.RepositoryUri
@@ -134,3 +145,7 @@ Outputs:
     Value: !GetAtt TemporalUIRepo.RepositoryUri
     Export:
       Name: htx-onboarding-TemporalUIRepoUri
+  XRayDaemonRepoUri:
+    Value: !GetAtt XRayDaemonRepo.RepositoryUri
+    Export:
+      Name: htx-onboarding-XRayDaemonRepoUri

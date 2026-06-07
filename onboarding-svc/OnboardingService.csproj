@@ -13,6 +13,7 @@
     <Content Update="holidays.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
+      <PackageReference Include="AWSXRayRecorder.Handlers.AspNetCore" Version="2.13.0" />
       <PackageReference Include="Dapper" Version="2.1.79" />
       <PackageReference Include="StackExchange.Redis" Version="2.8.24" />
       <PackageReference Include="Npgsql" Version="10.0.3" />

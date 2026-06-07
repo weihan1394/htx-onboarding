@@ -254,6 +254,16 @@ Resources:
       SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
       PrivateDnsEnabled: true
 
+  XRayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.xray
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref AppSubnet1]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
 Outputs:
   VPCId:
     Value: !Ref VPC

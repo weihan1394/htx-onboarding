@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES="${SCRIPT_DIR}/templates"
 ROOT="${SCRIPT_DIR}/../.."
 
-# ── Prerequisites ─────────────────────────────────────────────────────────────
+# -- Prerequisites -------------------------------------------------------------
 # shellcheck source=helpers/check-prerequisites.sh
 source "${SCRIPT_DIR}/../helpers/check-prerequisites.sh" --with-aws --with-node --with-docker
 
@@ -40,7 +40,7 @@ deploy() {
 
   case "${current_status}" in
     ROLLBACK_COMPLETE|CREATE_FAILED|DELETE_FAILED)
-      echo "    Stack is in ${current_status} — deleting before re-deploy..."
+      echo "    Stack is in ${current_status} - deleting before re-deploy..."
       aws cloudformation delete-stack --stack-name "${stack}" --region "${REGION}"
       aws cloudformation wait stack-delete-complete --stack-name "${stack}" --region "${REGION}" 2>/dev/null || true
       local post_delete
@@ -80,8 +80,8 @@ ecr_image_exists() {
     --output text 2>/dev/null | grep -q "IMAGE"
 }
 
-# ── 0. GitHub Actions OIDC role ───────────────────────────────────────────────
-# Provisions the OIDC provider and deploy role once. Safe to re-run — CloudFormation
+# -- 0. GitHub Actions OIDC role -----------------------------------------------
+# Provisions the OIDC provider and deploy role once. Safe to re-run - CloudFormation
 # is idempotent. Pass --parameter-overrides CreateOIDCProvider=false if the
 # token.actions.githubusercontent.com OIDC provider already exists in this account.
 echo "    GitHub:  ${GITHUB_ORG}/${GITHUB_REPO}"
@@ -99,13 +99,13 @@ echo "    ✅  GitHub deploy role: ${ROLE_ARN}"
 echo "    Add this as AWS_ROLE_ARN in GitHub → Settings → Secrets → Actions"
 echo ""
 
- # ── 1. Network ────────────────────────────────────────────────────────────────
+ # -- 1. Network ----------------------------------------------------------------
 deploy htx-onboarding-network 1-network.yaml
 
-# ── 2. ECR ────────────────────────────────────────────────────────────────────
+# -- 2. ECR --------------------------------------------------------------------
 deploy htx-onboarding-ecr 2-ecr.yaml
 
-# ── 3. Build and push all images ──────────────────────────────────────────────
+# -- 3. Build and push all images ----------------------------------------------
 echo ""
 echo "==> [$((++STEP))] Building and pushing images to ECR..."
 aws ecr get-login-password --region "${REGION}" | \
@@ -123,14 +123,15 @@ ONBOARDING_SVC_REPO=$(ecr_output OnboardingSvcRepoUri)
 WORKFLOW_SVC_REPO=$(ecr_output WorkflowSvcRepoUri)
 TEMPORAL_REPO=$(ecr_output TemporalRepoUri)
 TEMPORAL_UI_REPO=$(ecr_output TemporalUIRepoUri)
+XRAY_DAEMON_REPO=$(ecr_output XRayDaemonRepoUri)
 DB_INIT_REPO=$(ecr_output DBInitRepoUri)
 HR_DB_MIGRATE_REPO=$(ecr_output HRDBMigrateRepoUri)
 ONBOARDING_DB_MIGRATE_REPO=$(ecr_output OnboardingDBMigrateRepoUri)
 
 # third-party images: only pull/push if the specific version tag is not already in ECR
-# (these are mirrors of Docker Hub images — no need to re-push on every deploy)
+# (these are mirrors of Docker Hub images - no need to re-push on every deploy)
 if ecr_image_exists "${TEMPORAL_REPO}" "${TEMPORAL_VERSION}"; then
-  echo "    temporal:${TEMPORAL_VERSION} — already in ECR, skipping"
+  echo "    temporal:${TEMPORAL_VERSION} - already in ECR, skipping"
 else
   echo "    temporal (mirror from Docker Hub)..."
   "${DOCKER}" pull ${DOCKER_PULL_OPTS} --platform linux/amd64 temporalio/auto-setup:${TEMPORAL_VERSION}
@@ -141,7 +142,7 @@ else
 fi
 
 if ecr_image_exists "${TEMPORAL_UI_REPO}" "${TEMPORAL_UI_VERSION}"; then
-  echo "    temporal-ui:${TEMPORAL_UI_VERSION} — already in ECR, skipping"
+  echo "    temporal-ui:${TEMPORAL_UI_VERSION} - already in ECR, skipping"
 else
   echo "    temporal-ui (mirror from Docker Hub)..."
   "${DOCKER}" pull ${DOCKER_PULL_OPTS} --platform linux/amd64 temporalio/ui:${TEMPORAL_UI_VERSION}
@@ -151,34 +152,29 @@ else
   "${DOCKER}" push "${TEMPORAL_UI_REPO}:latest"
 fi
 
-# app images: skip build+push if the exact IMAGE_TAG already exists in ECR
-# (useful when re-running a deploy for the same commit SHA)
-if ecr_image_exists "${HR_SVC_REPO}" "${IMAGE_TAG}"; then
-  echo "    hr-svc:${IMAGE_TAG} — already in ECR, skipping"
+if ecr_image_exists "${XRAY_DAEMON_REPO}" "latest"; then
+  echo "    xray-daemon:latest - already in ECR, skipping"
 else
-  echo "    hr-svc..."
-  "${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${HR_SVC_REPO}:${IMAGE_TAG}" "${ROOT}/hr-svc/"
-  "${DOCKER}" push "${HR_SVC_REPO}:${IMAGE_TAG}"
+  echo "    xray-daemon (mirror from Docker Hub)..."
+  "${DOCKER}" pull ${DOCKER_PULL_OPTS} --platform linux/amd64 amazon/aws-xray-daemon:latest
+  "${DOCKER}" tag amazon/aws-xray-daemon:latest "${XRAY_DAEMON_REPO}:latest"
+  "${DOCKER}" push "${XRAY_DAEMON_REPO}:latest"
 fi
 
-if ecr_image_exists "${ONBOARDING_SVC_REPO}" "${IMAGE_TAG}"; then
-  echo "    onboarding-svc:${IMAGE_TAG} — already in ECR, skipping"
-else
-  echo "    onboarding-svc..."
-  "${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${ONBOARDING_SVC_REPO}:${IMAGE_TAG}" "${ROOT}/onboarding-svc/"
-  "${DOCKER}" push "${ONBOARDING_SVC_REPO}:${IMAGE_TAG}"
-fi
+echo "    hr-svc..."
+"${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${HR_SVC_REPO}:${IMAGE_TAG}" "${ROOT}/hr-svc/"
+"${DOCKER}" push "${HR_SVC_REPO}:${IMAGE_TAG}"
 
-if ecr_image_exists "${WORKFLOW_SVC_REPO}" "${IMAGE_TAG}"; then
-  echo "    workflow-svc:${IMAGE_TAG} — already in ECR, skipping"
-else
-  echo "    workflow-svc..."
-  "${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${WORKFLOW_SVC_REPO}:${IMAGE_TAG}" "${ROOT}/workflow-svc/"
-  "${DOCKER}" push "${WORKFLOW_SVC_REPO}:${IMAGE_TAG}"
-fi
+echo "    onboarding-svc..."
+"${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${ONBOARDING_SVC_REPO}:${IMAGE_TAG}" "${ROOT}/onboarding-svc/"
+"${DOCKER}" push "${ONBOARDING_SVC_REPO}:${IMAGE_TAG}"
+
+echo "    workflow-svc..."
+"${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${WORKFLOW_SVC_REPO}:${IMAGE_TAG}" "${ROOT}/workflow-svc/"
+"${DOCKER}" push "${WORKFLOW_SVC_REPO}:${IMAGE_TAG}"
 
 if ecr_image_exists "${DB_INIT_REPO}" "latest"; then
-  echo "    db-init:latest — already in ECR, skipping"
+  echo "    db-init:latest - already in ECR, skipping"
 else
   echo "    db-init..."
   "${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${DB_INIT_REPO}:latest" "${ROOT}/ops/aws/helpers/db-init/"
@@ -186,7 +182,7 @@ else
 fi
 
 if ecr_image_exists "${HR_DB_MIGRATE_REPO}" "latest"; then
-  echo "    hr-db-migrate:latest — already in ECR, skipping"
+  echo "    hr-db-migrate:latest - already in ECR, skipping"
 else
   echo "    hr-db-migrate..."
   "${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${HR_DB_MIGRATE_REPO}:latest" "${ROOT}/hr-db/"
@@ -194,7 +190,7 @@ else
 fi
 
 if ecr_image_exists "${ONBOARDING_DB_MIGRATE_REPO}" "latest"; then
-  echo "    onboarding-db-migrate:latest — already in ECR, skipping"
+  echo "    onboarding-db-migrate:latest - already in ECR, skipping"
 else
   echo "    onboarding-db-migrate..."
   "${DOCKER}" build ${DOCKER_BUILD_OPTS} --platform linux/amd64 -t "${ONBOARDING_DB_MIGRATE_REPO}:latest" "${ROOT}/onboarding-db/"
@@ -203,10 +199,10 @@ fi
 
 echo "    Done."
 
-# ── 4. Storage (RDS + ElastiCache + Secrets) ──────────────────────────────────
+# -- 4. Storage (RDS + ElastiCache + Secrets) ----------------------------------
 deploy htx-onboarding-storage 3-storage.yaml
 
-# ── 5. Populate connection strings ────────────────────────────────────────────
+# -- 5. Populate connection strings --------------------------------------------
 # Must happen before compute so ECS tasks start with real DB credentials.
 echo ""
 echo "==> [$((++STEP))] Updating connection strings in Secrets Manager..."
@@ -238,26 +234,26 @@ aws secretsmanager put-secret-value \
 
 echo "    Done."
 
-# ── 6. Compute infra (cluster, ALB, task defs — no services yet) ──────────────
+# -- 6. Compute infra (cluster, ALB, task defs - no services yet) --------------
 deploy htx-onboarding-compute-infra 4a-compute-infra.yaml \
   --parameter-overrides \
     ImageTag="${IMAGE_TAG}" \
     TemporalVersion="${TEMPORAL_VERSION}" \
     TemporalUIVersion="${TEMPORAL_UI_VERSION}"
 
-# ── 7. Init database ──────────────────────────────────────────────────────────
-# Creates the htx database and service accounts. Idempotent — safe on every run.
+# -- 7. Init database ----------------------------------------------------------
+# Creates the htx database and service accounts. Idempotent - safe on every run.
 echo ""
 echo "==> [$((++STEP))] Initialising database..."
 "${SCRIPT_DIR}/helpers/init-db.sh"
 
-# ── 8. Run Flyway migrations ──────────────────────────────────────────────────
-# Applies any new SQL migrations. Idempotent — already-applied ones are skipped.
+# -- 8. Run Flyway migrations --------------------------------------------------
+# Applies any new SQL migrations. Idempotent - already-applied ones are skipped.
 echo ""
 echo "==> [$((++STEP))] Running migrations..."
 "${SCRIPT_DIR}/helpers/migrate.sh"
 
-# ── 9. Start Temporal only — must be stable before namespace bootstrap ────────
+# -- 9. Start Temporal only - must be stable before namespace bootstrap --------
 deploy htx-onboarding-temporal 4b-temporal.yaml
 
 echo ""
@@ -271,8 +267,8 @@ aws ecs wait services-stable \
   --region "${REGION}"
 echo "    Done."
 
-# ── 9b. Bootstrap Temporal namespace + search attributes ─────────────────────
-# Idempotent — safe to re-run. Runs after Temporal is confirmed stable so the
+# -- 9b. Bootstrap Temporal namespace + search attributes ---------------------
+# Idempotent - safe to re-run. Runs after Temporal is confirmed stable so the
 # namespace exists before workflow-svc starts.
 echo ""
 echo "==> [$((++STEP))] Bootstrapping Temporal namespace..."
@@ -330,17 +326,17 @@ echo "    Task: ${BOOTSTRAP_TASK_ID}"
 aws ecs wait tasks-stopped --cluster "${CLUSTER}" --tasks "${BOOTSTRAP_TASK_ID}" --region "${REGION}"
 echo "    Done."
 
-# ── 9c. Remaining app services (namespace exists — workflow-svc starts cleanly) ─
+# -- 9c. Remaining app services (namespace exists - workflow-svc starts cleanly) -
 deploy htx-onboarding-compute-services 4c-compute-services.yaml
 
-# ── 10. CDN (CloudFront + S3) ─────────────────────────────────────────────────
+# -- 10. CDN (CloudFront + S3) -------------------------------------------------
 export TEMPORAL_UI_BASIC_AUTH=$(printf '%s' 'admin:P@ssw0rd' | base64)
 deploy htx-onboarding-cdn 5-cdn.yaml \
   --parameter-overrides TemporalUIBasicAuth="${TEMPORAL_UI_BASIC_AUTH}"
 
-# ── 10b. Allow CloudFront VPC Origin SG into ALB SG ──────────────────────────
+# -- 10b. Allow CloudFront VPC Origin SG into ALB SG --------------------------
 # CloudFront creates a managed SG for its VPC Origin ENIs. CIDR-based rules alone
-# are not sufficient — the ALB SG must explicitly reference the CloudFront SG.
+# are not sufficient - the ALB SG must explicitly reference the CloudFront SG.
 echo ""
 echo "==> Updating ALB security group to allow CloudFront VPC Origin..."
 ALB_SG=$(aws cloudformation describe-stacks \
@@ -363,7 +359,7 @@ if [ -n "${CF_VPC_ORIGIN_SG}" ] && [ "${CF_VPC_ORIGIN_SG}" != "None" ]; then
   echo "    CloudFront VPC Origin SG ${CF_VPC_ORIGIN_SG} added to ALB SG."
 fi
 
-# ── 11. Build and deploy hr-web (Vite SPA → S3 + CloudFront invalidation) ──────
+# -- 11. Build and deploy hr-web (Vite SPA → S3 + CloudFront invalidation) ------
 echo ""
 echo "==> [$((++STEP))] Building and deploying hr-web..."
 
@@ -403,10 +399,10 @@ aws cloudfront create-invalidation \
 cd "${SCRIPT_DIR}"
 echo "    Done. https://${CLOUDFRONT_DOMAIN}"
 
-# ── 12. Scheduler (auto stop/start ECS services) ─────────────────────────────
+# -- 12. Scheduler (auto stop/start ECS services) -----------------------------
 deploy htx-onboarding-scheduler 6-scheduler.yaml
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# -- Summary -------------------------------------------------------------------
 echo ""
 echo "==> All done. CloudFront domain:"
 echo "    https://${CLOUDFRONT_DOMAIN}"

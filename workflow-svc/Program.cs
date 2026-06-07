@@ -1,3 +1,4 @@
+using Amazon.XRay.Recorder.Handlers.AspNetCore;
 using Serilog;
 using Temporalio.Client;
 using WorkflowService.Services;
@@ -57,6 +58,7 @@ builder.Services.AddScoped<IOnboardingWorkflowService, OnboardingWorkflowService
 var app = builder.Build();
 
 app.UseCors();
+app.UseWhen(ctx => !ctx.Request.Path.StartsWithSegments("/health"), b => b.UseXRay("workflow-svc"));
 app.UseSerilogRequestLogging();
 app.UseSwagger();
 app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Workflow Service v1"));
