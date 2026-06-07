@@ -32,7 +32,7 @@ Integration between an **HR System** and an **Onboarding System**, orchestrated 
 
 > Deployed to `ap-southeast-1` via CloudFormation. See [ops/aws/README.md](ops/aws/README.md) for full infrastructure details, cost breakdown, and deployment guide.
 
-**Live deployment:** <https://dcrpz0lipg2qu.cloudfront.net>
+**Live deployment:** <https://dx1rxjawwi5zt.cloudfront.net>
 
 > Temporal UI is at `/temporal-ui` with basic auth — credentials: `admin` / `P@ssw0rd`
 

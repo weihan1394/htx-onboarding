@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTX Onboarding - EventBridge Scheduler (auto stop/start ECS services)
+
+Parameters:
+
+  StopCron:
+    Type: String
+    Default: "cron(0 20 * * ? *)"
+    Description: "Cron to stop all services (Asia/Singapore timezone). Default: 8:00pm daily."
+
+  StartCron:
+    Type: String
+    Default: "cron(0 8 * * ? *)"
+    Description: "Cron to start Temporal (Asia/Singapore timezone). Default: 8:00am daily. App services start 5 min later."
+
+Resources:
+
+  # ── IAM Role ──────────────────────────────────────────────────────────────────
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: htx-onboarding-scheduler
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSUpdateService
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecs:UpdateService
+                Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/htx-onboarding/*
+
+  # ── Schedule Group ────────────────────────────────────────────────────────────
+  ScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: htx-onboarding
+
+  # ── Stop Schedules (8:00pm SGT daily) ────────────────────────────────────────
+  StopTemporal:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-stop-temporal
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"temporal","DesiredCount":0}'
+
+  StopTemporalUI:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-stop-temporal-ui
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"temporal-ui","DesiredCount":0}'
+
+  StopHRSvc:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-stop-hr-svc
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"hr-svc","DesiredCount":0}'
+
+  StopOnboardingSvc:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-stop-onboarding-svc
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"onboarding-svc","DesiredCount":0}'
+
+  StopWorkflowSvc:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-stop-workflow-svc
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"workflow-svc","DesiredCount":0}'
+
+  # ── Start Schedules ───────────────────────────────────────────────────────────
+  # Temporal starts at StartCron (default 8:00am SGT).
+  # App services start 5 min later to ensure Temporal is healthy first.
+
+  StartTemporal:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-start-temporal
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: !Ref StartCron
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"temporal","DesiredCount":1}'
+
+  StartTemporalUI:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-start-temporal-ui
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: cron(5 8 * * ? *)
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"temporal-ui","DesiredCount":1}'
+
+  StartHRSvc:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-start-hr-svc
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: cron(5 8 * * ? *)
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"hr-svc","DesiredCount":1}'
+
+  StartOnboardingSvc:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-start-onboarding-svc
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: cron(5 8 * * ? *)
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"onboarding-svc","DesiredCount":1}'
+
+  StartWorkflowSvc:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: htx-start-workflow-svc
+      GroupName: !Ref ScheduleGroup
+      ScheduleExpression: cron(5 8 * * ? *)
+      ScheduleExpressionTimezone: Asia/Singapore
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ecs:updateService
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"Cluster":"htx-onboarding","Service":"workflow-svc","DesiredCount":1}'

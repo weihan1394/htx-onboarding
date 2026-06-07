@@ -108,6 +108,8 @@ Resources:
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups:
         - !ImportValue htx-onboarding-RDSSecurityGroupId
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
       BackupRetentionPeriod: 0
       PreferredMaintenanceWindow: sun:19:00-sun:20:00
       DeletionProtection: true

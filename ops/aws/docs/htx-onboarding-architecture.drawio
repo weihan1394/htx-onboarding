@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e" pages="3">
     <diagram id="create-employee-flow" name="Onboarding Flow">
-        <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+        <mxGraphModel dx="677" dy="458" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -309,7 +309,7 @@
         </mxGraphModel>
     </diagram>
     <diagram id="full-aws-arch" name="AWS Architecture">
-        <mxGraphModel dx="930" dy="995" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1200" math="0" shadow="0">
+        <mxGraphModel dx="1408" dy="1941" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1200" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -415,13 +415,19 @@
                 <mxCell id="iam" value="IAM Deploy Role&#xa;(htx-deploy)" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.role;fillColor=#DD344C;strokeColor=none;fontColor=#232F3E;fontStyle=1;fontSize=9;verticalLabelPosition=bottom;verticalAlign=top;" parent="1" vertex="1">
                     <mxGeometry x="760" y="1009.5" width="55" height="55" as="geometry"/>
                 </mxCell>
-                <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#232F3E;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="user" target="cf" edge="1">
+                <mxCell id="waf" value="AWS WAF" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.waf;fillColor=#DD344C;strokeColor=none;fontColor=#232F3E;fontStyle=1;fontSize=10;verticalLabelPosition=bottom;verticalAlign=top;opacity=50;" parent="1" vertex="1">
+                    <mxGeometry x="132.5" y="130" width="60" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#232F3E;strokeWidth=2;" parent="1" source="user" target="waf" edge="1">
                     <mxGeometry relative="1" as="geometry">
                         <Array as="points">
                             <mxPoint x="100" y="455"/>
-                            <mxPoint x="100" y="455"/>
+                            <mxPoint x="100" y="160"/>
                         </Array>
                     </mxGeometry>
+                </mxCell>
+                <mxCell id="e-waf-cf" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#DD344C;strokeWidth=2;" parent="1" source="waf" target="cf" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
                 </mxCell>
                 <mxCell id="e2" value="/* (OAC)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#3F8624;strokeWidth=2;fontColor=#3F8624;fontStyle=1;fontSize=9;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="cf" target="s3" edge="1">
                     <mxGeometry relative="1" as="geometry"/>
@@ -521,17 +527,29 @@
                         </Array>
                     </mxGeometry>
                 </mxCell>
-                <mxCell id="tE_j4KoRQDFlZ3g-LnWg-1" value="" style="group" vertex="1" connectable="0" parent="1">
+                <mxCell id="tE_j4KoRQDFlZ3g-LnWg-1" value="" style="group" parent="1" vertex="1" connectable="0">
                     <mxGeometry x="1460" y="740" width="130" height="210" as="geometry"/>
                 </mxCell>
-                <mxCell id="eps-box" value="VPC Interface Endpoints" style="rounded=1;fillColor=#E8F5E9;strokeColor=#4CAF50;strokeWidth=1;fontSize=9;fontStyle=1;fontColor=#232F3E;verticalAlign=top;spacingTop=5;align=center;" vertex="1" parent="tE_j4KoRQDFlZ3g-LnWg-1">
+                <mxCell id="eps-box" value="VPC Interface Endpoints" style="rounded=1;fillColor=#E8F5E9;strokeColor=#4CAF50;strokeWidth=1;fontSize=9;fontStyle=1;fontColor=#232F3E;verticalAlign=top;spacingTop=5;align=center;" parent="tE_j4KoRQDFlZ3g-LnWg-1" vertex="1">
                     <mxGeometry width="130" height="190" as="geometry"/>
                 </mxCell>
-                <mxCell id="eps-icon" value="" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.endpoint;fillColor=#8C4FFF;strokeColor=none;" vertex="1" parent="tE_j4KoRQDFlZ3g-LnWg-1">
+                <mxCell id="eps-icon" value="" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.endpoint;fillColor=#8C4FFF;strokeColor=none;" parent="tE_j4KoRQDFlZ3g-LnWg-1" vertex="1">
                     <mxGeometry x="43" y="30" width="45" height="45" as="geometry"/>
                 </mxCell>
-                <mxCell id="eps-list" value="• ECR API&#xa;• ECR DKR&#xa;• Secrets Manager&#xa;• CloudWatch Logs&#xa;• ECS&#xa;• ECS Agent&#xa;• ECS Telemetry&#xa;• S3 Gateway" style="text;fontSize=9;align=left;verticalAlign=top;fontColor=#232F3E;spacingLeft=4;" vertex="1" parent="tE_j4KoRQDFlZ3g-LnWg-1">
+                <mxCell id="eps-list" value="• ECR API&#xa;• ECR DKR&#xa;• Secrets Manager&#xa;• CloudWatch Logs&#xa;• ECS&#xa;• ECS Agent&#xa;• ECS Telemetry&#xa;• S3 Gateway" style="text;fontSize=9;align=left;verticalAlign=top;fontColor=#232F3E;spacingLeft=4;" parent="tE_j4KoRQDFlZ3g-LnWg-1" vertex="1">
                     <mxGeometry x="4" y="80" width="123" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="eb-scheduler" value="EventBridge Scheduler&#xa;08:00 start · 20:00 stop" style="shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.eventbridge;fillColor=#E7157B;strokeColor=none;fontColor=#232F3E;fontStyle=1;fontSize=9;verticalLabelPosition=bottom;verticalAlign=top;" vertex="1" parent="1">
+                    <mxGeometry x="860" y="-30" width="55" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="e-eb-ecs" value="scale desiredCount 0/1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#E7157B;strokeWidth=2;fontColor=#E7157B;fontStyle=2;fontSize=9;dashed=1;exitX=0.509;exitY=0.994;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;exitPerimeter=0;" edge="1" parent="1" source="eb-scheduler" target="ecs-a">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="885" y="25"/>
+                        </Array>
+                        <mxPoint x="1232.5" y="-220" as="sourcePoint"/>
+                        <mxPoint x="1230" y="160" as="targetPoint"/>
+                    </mxGeometry>
                 </mxCell>
             </root>
         </mxGraphModel>

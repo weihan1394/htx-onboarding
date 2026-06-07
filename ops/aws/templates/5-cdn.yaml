@@ -36,6 +36,26 @@ Resources:
           return request;
         }
 
+  # ── S3 Access Logs Bucket ─────────────────────────────────────────────────────
+  HRWebAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub htx-onboarding-hr-web-logs-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+
   # ── S3 Bucket (hr-web static assets) ─────────────────────────────────────────
   HRWebBucket:
     Type: AWS::S3::Bucket
@@ -46,6 +66,15 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref HRWebAccessLogsBucket
+        LogFilePrefix: s3-access-logs/
 
   # ── CloudFront Origin Access Control (for S3) ─────────────────────────────────
   S3OriginAccessControl:
@@ -57,7 +86,7 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
-  # S3 bucket policy — allows only CloudFront OAC
+  # S3 bucket policy — allows only CloudFront OAC, denies non-SSL
   HRWebBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -72,7 +101,35 @@ Resources:
             Resource: !Sub '${HRWebBucket.Arn}/*'
             Condition:
               StringEquals:
-                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt HRWebBucket.Arn
+              - !Sub '${HRWebBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # S3 access logs bucket policy — denies non-SSL
+  HRWebAccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref HRWebAccessLogsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt HRWebAccessLogsBucket.Arn
+              - !Sub '${HRWebAccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
 
   # ── CloudFront VPC Origin (connects to internal ALB privately) ────────────────
   VpcOrigin:

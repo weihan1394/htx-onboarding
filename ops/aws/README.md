@@ -47,6 +47,7 @@ Each template is an independent CloudFormation stack. Outputs are exported with
 | `templates/4b-temporal.yaml`         | `htx-onboarding-temporal`         | Temporal ECS service                                   |
 | `templates/4c-compute-services.yaml` | `htx-onboarding-compute-services` | hr-svc, onboarding-svc, workflow-svc, temporal-ui      |
 | `templates/5-cdn.yaml`               | `htx-onboarding-cdn`              | CloudFront distribution, S3 bucket, VPC Origin         |
+| `templates/6-scheduler.yaml`         | `htx-onboarding-scheduler`        | EventBridge Scheduler — auto stop/start ECS services   |
 
 ---
 
@@ -106,6 +107,48 @@ Each template is an independent CloudFormation stack. Outputs are exported with
 | CloudFront Distribution | HTTPS, path-based routing, SPA fallback       | ~$0.00 (free tier) |
 | CloudFront Function     | Basic auth guard for Temporal UI              | Free               |
 
+### Scheduler (`6-scheduler.yaml`)
+
+| Resource             | Details                                                                          | Cost |
+| -------------------- | -------------------------------------------------------------------------------- | ---- |
+| IAM Role             | `htx-onboarding-scheduler` — grants EventBridge permission to call UpdateService | Free |
+| Schedule Group       | `htx-onboarding` — logical grouping for all schedules                            | Free |
+| Stop schedules (×5)  | Scale each ECS service to 0 at **20:00 SGT** daily                               | Free |
+| Start schedules (×5) | Temporal at **08:00 SGT**, app services at **08:05 SGT** daily                   | Free |
+
+> EventBridge Scheduler charges per invocation. 10 schedules × 1/day × 30 days = 300 invocations/month — well within the 14 million free tier limit.
+
+---
+
+## Cost Optimisation (Demo / Non-Production)
+
+Two measures are applied to reduce cost for demonstration purposes without tearing down the infrastructure:
+
+### 1. Single-AZ deployment
+
+All ECS tasks are pinned to `ap-southeast-1a`. The ALB and subnet groups span two AZs only because AWS requires it for those resource types. There are no duplicate tasks or standby instances running in the second AZ. This halves the Fargate and VPC endpoint costs compared to a multi-AZ setup (which would be required in production for high availability).
+
+### 2. EventBridge Scheduler — auto stop/start
+
+ECS Fargate tasks are the only elastic cost in this architecture. The `6-scheduler.yaml` stack provisions 10 EventBridge schedules to automatically scale all five services to 0 at night and back to 1 in the morning:
+
+| Schedule           | Time (SGT) | Action                                                  |
+| ------------------ | ---------- | ------------------------------------------------------- |
+| Stop all           | 20:00      | All 5 services → desiredCount 0                         |
+| Start Temporal     | 08:00      | temporal → desiredCount 1 (healthy before apps connect) |
+| Start app services | 08:05      | temporal-ui, hr-svc, onboarding-svc, workflow-svc → 1   |
+
+Temporal starts 5 minutes before the app services to ensure it is healthy before `workflow-svc` attempts to connect.
+
+Running **12 hours/day** instead of 24/7 cuts Fargate costs by ~50% (~$30/month saved). RDS, ElastiCache, ALB, and VPC endpoints run continuously as they are fixed base costs of the architecture with no pause feature.
+
+To override the schedule and start/stop manually:
+
+```bash
+./ops/aws/start-services.sh   # scale all services up immediately
+./ops/aws/stop-services.sh    # scale all services down immediately
+```
+
 ---
 
 ## Cost Summary (ap-southeast-1, on-demand)
@@ -122,7 +165,9 @@ All AWS services are billed by the hour. Estimates assume 24/7 uptime.
 | Cloud Map                          | $0.0013    | $0.03      | $0.90     |
 | ALB + CloudWatch                   | $0.0013    | $0.03      | $0.90     |
 | CloudFront + S3 + ECR              | ~$0.00     | ~$0.00     | ~$0.00    |
-| **Total**                          | **~$0.21** | **~$5.15** | **~$155** |
+| EventBridge Scheduler              | Free       | Free       | Free      |
+| **Total (24/7)**                   | **~$0.21** | **~$5.15** | **~$155** |
+| **Total (12hr/day via scheduler)** | —          | **~$4.12** | **~$124** |
 
 > **Tip — tear down when not in use:**
 >
@@ -153,7 +198,7 @@ Two scripts cover everything:
 
 ### Full Deploy
 
-Provisions all stacks, builds and pushes images, runs DB migrations, bootstraps Temporal, and deploys hr-web to S3 — all in one shot.
+Provisions all stacks, builds and pushes images, runs DB migrations, bootstraps Temporal, and deploys hr-web to S3.
 
 ```bash
 ./ops/aws/1-deploy.sh           # deploy with latest image tag

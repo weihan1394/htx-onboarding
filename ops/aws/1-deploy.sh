@@ -403,7 +403,14 @@ aws cloudfront create-invalidation \
 cd "${SCRIPT_DIR}"
 echo "    Done. https://${CLOUDFRONT_DOMAIN}"
 
+# ── 12. Scheduler (auto stop/start ECS services) ─────────────────────────────
+deploy htx-onboarding-scheduler 6-scheduler.yaml
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "==> All done. CloudFront domain:"
 echo "    https://${CLOUDFRONT_DOMAIN}"
+echo ""
+echo "    ECS services auto-stop  at 20:00 SGT daily."
+echo "    ECS services auto-start at 08:00 SGT daily."
+echo "    To override manually: ops/aws/stop-services.sh / ops/aws/start-services.sh"
